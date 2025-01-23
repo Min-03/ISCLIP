@@ -141,7 +141,8 @@ def train(cfg):
     time0 = datetime.datetime.now()
     time0 = time0.replace(microsecond=0)
 
-    train_dataset = coco.CocoClsDataset(
+    annotation_file_dir = os.path.join(cfg.dataset.root_dir, "annotations/captions_train2014.json")
+    train_dataset = coco.CocoCapClsDataset(
         root_dir=cfg.dataset.root_dir,
         name_list_dir=cfg.dataset.name_list_dir,
         split=cfg.train.split,
@@ -153,6 +154,7 @@ def train(cfg):
         img_fliplr=True,
         ignore_index=cfg.dataset.ignore_index,
         num_classes=cfg.dataset.num_classes,
+        gt_annotation_file=annotation_file_dir
     )
 
     val_dataset = coco.CocoSegDataset(
@@ -238,10 +240,10 @@ def train(cfg):
     for n_iter in range(cfg.train.max_iters):
         
         try:
-            img_name, inputs, cls_labels, img_box = next(train_loader_iter)
+            img_name, inputs, cls_labels, img_box, caption = next(train_loader_iter)
         except:
             train_loader_iter = iter(train_loader)
-            img_name, inputs, cls_labels, img_box = next(train_loader_iter)
+            img_name, inputs, cls_labels, img_box, caption = next(train_loader_iter)
 
         segs, cam, attn_pred = WeCLIP_model(inputs.cuda(), img_name)
 

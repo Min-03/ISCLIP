@@ -132,7 +132,7 @@ class WeCLIP(nn.Module):
             return seg, None, attn_pred
 
         for i, img_name in enumerate(img_names):
-            img_path = os.path.join(self.root_path, 'train', str(img_name)+'.png')
+            img_path = os.path.join(self.root_path, str(img_name)+'.png')
             img_i = img[i]
             cam_fts = cam_fts_all[i]
             cam_attn = attn_weight_stack[i]

@@ -284,7 +284,7 @@ def train(cfg):
         if (n_iter + 1) % cfg.train.eval_iters == 0:
             ckpt_name = os.path.join(cfg.work_dir.ckpt_dir, "WeCLIP_model_iter_%d.pth"%(n_iter+1))
             logging.info('Validating...')
-            if (n_iter + 1) > 26000:
+            if (n_iter + 1) > 20000:
                 torch.save(WeCLIP_model.state_dict(), ckpt_name)
             seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
             logging.info("cams score:")
