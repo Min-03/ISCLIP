@@ -31,7 +31,7 @@ def reshape_transform(tensor, height=28, width=28):
 def zeroshot_classifier(classnames, templates, model):
     with torch.no_grad():
         zeroshot_weights = []
-        for classname in classnames:
+        for classname in classnames: 
             texts = [template.format(classname) for template in templates] #format with class
             texts = clip.tokenize(texts).cuda() #tokenize
             class_embeddings = model.encode_text(texts) #embed with text encoder
@@ -53,6 +53,25 @@ def _refine_cams(ref_mod, images, cams, valid_key):
     return refined_label.squeeze(0)
 
 
+class TextFusionTransformer(nn.Module):
+    def __init__(self, embed_dim, heads, layers=2, dropout=0.1):
+        super(TextFusionTransformer, self).__init__()
+        self.multihead_attn = nn.MultiheadAttention(embed_dim, heads, dropout=dropout)
+        self.layer_norm = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.layers = layers
+        self.c = nn.Parameter(torch.tensor(1.0))
+    
+    def forward(self, query, key, value):
+        for _ in range(self.layers):
+            attn_output, _ = self.multihead_attn(query, key, value)
+            attn_output = self.dropout(attn_output)
+            query = self.layer_norm(query + self.c * attn_output)
+        return query
+    
+    
+    
+
 class WeCLIP(nn.Module):
     def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda'):
         super().__init__()
@@ -60,6 +79,7 @@ class WeCLIP(nn.Module):
         self.embedding_dim = embedding_dim
 
         self.encoder, _ = clip.load(clip_model, device=device)
+        self.encoder = self.encoder.to(torch.float32)
         self.in_channels = in_channels
 
         self.decoder_fts_fuse = SegFormerHead(in_channels=self.in_channels,embedding_dim=self.embedding_dim,
@@ -71,9 +91,10 @@ class WeCLIP(nn.Module):
         self.fg_text_features = zeroshot_classifier(new_class_names_coco, ['a clean origami {}.'],
                                                self.encoder)  # ['a rendering of a weird {}.'], model) (20, 512)
 
-
         self.target_layers = [self.encoder.visual.transformer.resblocks[-1].ln_1]
         self.grad_cam = GradCAM(model=self.encoder, target_layers=self.target_layers, reshape_transform=reshape_transform)
+        
+        self.fuse_transformer = TextFusionTransformer(embed_dim=512, heads=8, layers=2)
 
         self.root_path = os.path.join(dataset_root_path, 'SegmentationClass')
 
@@ -86,19 +107,34 @@ class WeCLIP(nn.Module):
 
     def get_param_groups(self):
 
-        param_groups = [[], [], [], []]  # backbone; backbone_norm; cls_head; seg_head;
+        param_groups = [[], [], [], [], []]  # backbone; backbone_norm; cls_head; seg_head; fuse_transformer
 
         for param in list(self.decoder.parameters()):
             param_groups[3].append(param)
         for param in list(self.decoder_fts_fuse.parameters()):
             param_groups[3].append(param)
+            
+        for param in list(self.fuse_transformer.parameters()):
+            param_groups[4].append(param)
 
         return param_groups
     
+    def refine_text(self, caption):
+        """
+        input
+        caption : single caption feature (1, clip_dim)
+        
+        output
+        fg_text_features : (fg_num, clip_dim)
+        bg_text_features : (bg_num, clip_dim)
+        """
+        caption = caption.cuda().to(torch.float32)
+        fg_text_features = self.fuse_transformer(self.fg_text_features.cuda().to(torch.float32), caption, caption)
+        bg_text_features = self.fuse_transformer(self.bg_text_features.cuda().to(torch.float32), caption, caption)
+        return fg_text_features, bg_text_features
 
 
-    def forward(self, img, img_names, mode='train'):
-
+    def forward(self, img, img_names, captions=None, mode='train'):
         cam_list = []
         b, c, h, w = img.shape
         self.iter_num += 1
@@ -127,26 +163,36 @@ class WeCLIP(nn.Module):
         attn_fts_flatten = attn_fts.reshape(f_b, f_c, f_h*f_w)
         attn_pred = attn_fts_flatten.transpose(2, 1).bmm(attn_fts_flatten)
         attn_pred = torch.sigmoid(attn_pred)
-
-        if mode=='val':
-            return seg, None, attn_pred
+        
+        cls_logits = []
+        
+        if mode == 'train':
+            caption_feats = zeroshot_classifier(captions, [''], self.encoder)
 
         for i, img_name in enumerate(img_names):
             img_path = os.path.join(self.root_path, str(img_name)+'.png')
             img_i = img[i]
-            cam_fts = cam_fts_all[i]
+            cam_fts = cam_fts_all[i].to(torch.float32)
             cam_attn = attn_weight_stack[i]
             seg_attn = attn_pred.unsqueeze(0)[:, i, :, :]
+            
+            if mode == 'train':
+                cap_feat = caption_feats[i]
+                fg_text_feats, bg_text_feats = self.refine_text(cap_feat.unsqueeze(0))
+            else:
+                fg_text_feats, bg_text_feats = self.fg_text_features, self.bg_text_features
+            
 
             if self.iter_num > 40000 or mode=='val': #40000
                 require_seg_trans = True
             else:
                 require_seg_trans = False
-
+            
+            cam_mode = 'train' if mode == 'debug' else mode
             cam_refined_list, keys, w, h = perform_single_coco_cam(img_path, img_i, cam_fts, cam_attn, seg_attn,
-                                                                   self.bg_text_features, self.fg_text_features,
+                                                                   bg_text_feats, fg_text_feats,
                                                                    self.grad_cam,
-                                                                   mode=mode,
+                                                                   mode=cam_mode,
                                                                    require_seg_trans=require_seg_trans)
 
             cam_dict = generate_cam_label(cam_refined_list, keys, w, h)
@@ -163,10 +209,13 @@ class WeCLIP(nn.Module):
                 cam_labels = _refine_cams(self.par, img[i], cams, valid_key)
 
             cam_list.append(cam_labels)
+            
+            cls_logit, _ = self.encoder.forward_last_layer(cam_fts, fg_text_feats)
+            cls_logits.append(cls_logit.squeeze(0))
 
         all_cam_labels = torch.stack(cam_list, dim=0)
+        cls_logits = torch.stack(cls_logits, dim=0)
 
 
-        return seg, all_cam_labels, attn_pred
-
+        return seg, all_cam_labels, attn_pred, cls_logits
 

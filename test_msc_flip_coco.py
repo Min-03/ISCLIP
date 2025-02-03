@@ -66,7 +66,7 @@ def validate(model, dataset, test_scales=None):
 
         segs_list = []
         inputs_cat = torch.cat([inputs, inputs.flip(-1)], dim=0)
-        segs_cat, cam, attn_loss = model(inputs_cat, names, mode = 'val')
+        segs_cat, cam, attn_loss, cls_logits = model(inputs_cat, names, mode = 'val')
 
         segs = segs_cat[0].unsqueeze(0)
 
@@ -80,7 +80,7 @@ def validate(model, dataset, test_scales=None):
                 _inputs = F.interpolate(inputs, scale_factor=s, mode='bilinear', align_corners=False)
                 inputs_cat = torch.cat([_inputs, _inputs.flip(-1)], dim=0)
 
-                segs_cat, cam_cat, attn_loss = model(inputs_cat, names, mode='val')
+                segs_cat, cam_cat, attn_loss, cls_logits = model(inputs_cat, names, mode='val')
 
                 _segs_cat = F.interpolate(segs_cat, size=(h, w), mode='bilinear', align_corners=False)
                 _segs = (_segs_cat[0,...] + _segs_cat[1,...].flip(-1)) / 2
@@ -221,7 +221,7 @@ def main(cfg):
     print("msc segs score:")
     print(msc_seg_score)
 
-    # crf_proc(config=cfg)
+    crf_proc(config=cfg)
 
     return True
 

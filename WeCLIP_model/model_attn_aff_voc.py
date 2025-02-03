@@ -106,6 +106,7 @@ class WeCLIP(nn.Module):
 
     def forward(self, img, img_names='2007_000032', mode='train'):
         cam_list = []
+        cls_logits = []
         b, c, h, w = img.shape
         self.encoder.eval()
         self.iter_num += 1
@@ -169,9 +170,13 @@ class WeCLIP(nn.Module):
                 cam_labels = _refine_cams(self.par, img[i], cams, valid_key)
             
             cam_list.append(cam_labels)
+            
+            cls_logit, _ = self.encoder.forward_last_layer(cam_fts, self.fg_text_features)
+            cls_logits.append(cls_logit.squeeze(0))
 
         all_cam_labels = torch.stack(cam_list, dim=0)
+        cls_logits = torch.stack(cls_logits, dim=0)
 
-        return seg, all_cam_labels, attn_pred
+        return seg, all_cam_labels, attn_pred, cls_logits
 
         

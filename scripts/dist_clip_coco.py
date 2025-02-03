@@ -7,6 +7,7 @@ import sys
 sys.path.append(".")
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
@@ -69,6 +70,7 @@ def cal_eta(time0, cur_iter, total_iter):
 
 
 def validate(model=None, data_loader=None, cfg=None):
+    model.eval()
 
     preds, gts, cams, aff_gts = [], [], [], []
     seg_hist = np.zeros((81, 81))
@@ -81,7 +83,7 @@ def validate(model=None, data_loader=None, cfg=None):
         inputs = inputs.cuda()
         labels = labels.cuda()
 
-        segs, cam, attn_loss = model(inputs, name, 'val')
+        segs, cam, attn_loss, _ = model(inputs, name, mode='val')
 
         resized_segs = F.interpolate(segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
 
@@ -102,13 +104,37 @@ def validate(model=None, data_loader=None, cfg=None):
     return seg_score, cam_score
 
 
+def get_map(label, out):
+    right_count = 0
+    wrong_count = 0
+    for b in range(out.size(0)):  # 8
+        gt = label[b].cpu().detach().numpy()
+        gt_cls = np.nonzero(gt)[0]
+        num = len(gt_cls)
+        pred = out[b].cpu().detach().numpy()
+        pred_cls = pred.argsort()[-num:][::-1]
+
+        for c in gt_cls:
+            if c in pred_cls:
+                right_count += 1
+            else:
+                wrong_count += 1
+                
+    return right_count / (right_count + wrong_count)
+
+
+
 def get_seg_loss(pred, label, ignore_index=255):
+    ce = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction='none')
     bg_label = label.clone()
     bg_label[label!=0] = ignore_index
-    bg_loss = F.cross_entropy(pred, bg_label.type(torch.long), ignore_index=ignore_index)
+    bg_cnt = (bg_label != ignore_index).long().sum()
+    bg_loss = ce(pred, bg_label.type(torch.long)).sum() / (bg_cnt + 1e-7)
+    
     fg_label = label.clone()
     fg_label[label==0] = ignore_index
-    fg_loss = F.cross_entropy(pred, fg_label.type(torch.long), ignore_index=ignore_index)
+    fg_cnt = (fg_label != ignore_index).long().sum()
+    fg_loss = ce(pred, fg_label.type(torch.long)).sum() / (fg_cnt + 1e-7)
 
     return (bg_loss + fg_loss) * 0.5
 
@@ -198,7 +224,6 @@ def train(cfg):
     mask_size = int(cfg.dataset.crop_size // 16)
     attn_mask = get_mask_by_radius(h=mask_size, w=mask_size, radius=args.radius)
     writer = SummaryWriter(cfg.work_dir.tb_logger_dir)
-
     optimizer = PolyWarmupAdamW(
         params=[
             {
@@ -221,6 +246,11 @@ def train(cfg):
                 "lr": cfg.optimizer.learning_rate*10,
                 "weight_decay": cfg.optimizer.weight_decay,
             },
+            {
+                "params": param_groups[4],
+                "lr": cfg.optimizer.learning_rate*10,
+                "weight_decay": cfg.optimizer.weight_decay,
+            }
         ],
         lr = cfg.optimizer.learning_rate,
         weight_decay = cfg.optimizer.weight_decay,
@@ -245,7 +275,7 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, caption = next(train_loader_iter)
 
-        segs, cam, attn_pred = WeCLIP_model(inputs.cuda(), img_name)
+        segs, cam, attn_pred, cls_logits = WeCLIP_model(inputs.cuda(), img_name, caption)
 
         pseudo_label = cam
 
@@ -257,10 +287,18 @@ def train(cfg):
         attn_loss, pos_count, neg_count = get_aff_loss(attn_pred, aff_label)
 
         seg_loss = get_seg_loss(segs, pseudo_label.type(torch.long), ignore_index=cfg.dataset.ignore_index)
+        
+        cls_loss = F.multilabel_soft_margin_loss(cls_logits, cls_labels.cuda())
 
-        loss = 1 * seg_loss + 0.1*attn_loss
+        if n_iter <= 12000:
+            loss = 0 * seg_loss + 0 * attn_loss + 1 * cls_loss
+        else:
+            loss = 1 * seg_loss + 0.1*attn_loss + 1 * cls_loss
+            
+        print("cls_loss", cls_loss)
+        print("map", get_map(cls_labels, cls_logits))
 
-        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item()})
+        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item(), 'cls_loss': cls_loss.item()})
 
         optimizer.zero_grad()
         loss.backward()
@@ -277,9 +315,9 @@ def train(cfg):
             seg_mAcc = (preds==gts).sum()/preds.size
 
 
-            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), seg_mAcc))
+            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, cls_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), avg_meter.pop('cls_loss'), seg_mAcc))
 
-            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item()}, global_step=n_iter)
+            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item(), "cls_loss": cls_loss.item()}, global_step=n_iter)
 
         
         if (n_iter + 1) % cfg.train.eval_iters == 0:
@@ -287,6 +325,11 @@ def train(cfg):
             logging.info('Validating...')
             if (n_iter + 1) > 40000:
                 torch.save(WeCLIP_model.state_dict(), ckpt_name)
+            seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
+            logging.info("cams score:")
+            logging.info(cam_score)
+            logging.info("segs score:")
+            logging.info(seg_score)
 
     return True
 

@@ -100,6 +100,23 @@ def validate(model=None, data_loader=None, cfg=None):
     model.train()
     return seg_score, cam_score
 
+def get_map(label, out):
+    right_count = 0
+    wrong_count = 0
+    for b in range(out.size(0)):  # 8
+        gt = label[b].cpu().detach().numpy()
+        gt_cls = np.nonzero(gt)[0]
+        num = len(gt_cls)
+        pred = out[b].cpu().detach().numpy()
+        pred_cls = pred.argsort()[-num:][::-1]
+
+        for c in gt_cls:
+            if c in pred_cls:
+                right_count += 1
+            else:
+                wrong_count += 1
+                
+    return right_count / (right_count + wrong_count)
 
 def get_seg_loss(pred, label, ignore_index=255):
     bg_label = label.clone()
@@ -242,7 +259,7 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box = next(train_loader_iter)
 
-        segs, cam, attn_pred = WeCLIP_model(inputs.cuda(), img_name)
+        segs, cam, attn_pred, cls_logits = WeCLIP_model(inputs.cuda(), img_name)
 
         pseudo_label = cam
 
@@ -255,6 +272,8 @@ def train(cfg):
         attn_loss, pos_count, neg_count = get_aff_loss(attn_pred, aff_label)
 
         seg_loss = get_seg_loss(segs, pseudo_label.type(torch.long), ignore_index=cfg.dataset.ignore_index)
+        
+        
 
         loss = 1 * seg_loss + 0.1*attn_loss
 
