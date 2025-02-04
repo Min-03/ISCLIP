@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from datasets import voc
-from utils.losses import get_aff_loss
+from utils.losses import get_aff_loss, MultiLabelCLLoss
 from utils import evaluate
 from utils.AverageMeter import AverageMeter
 from utils.camutils import cams_to_affinity_label
@@ -80,7 +80,7 @@ def validate(model=None, data_loader=None, cfg=None):
         inputs = inputs.cuda()
         labels = labels.cuda()
 
-        segs, cam, attn_loss = model(inputs, name, 'val')
+        segs, cam, attn_loss = model(inputs, name, mode='val')
 
         resized_segs = F.interpolate(segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
 
@@ -100,23 +100,7 @@ def validate(model=None, data_loader=None, cfg=None):
     model.train()
     return seg_score, cam_score
 
-def get_map(label, out):
-    right_count = 0
-    wrong_count = 0
-    for b in range(out.size(0)):  # 8
-        gt = label[b].cpu().detach().numpy()
-        gt_cls = np.nonzero(gt)[0]
-        num = len(gt_cls)
-        pred = out[b].cpu().detach().numpy()
-        pred_cls = pred.argsort()[-num:][::-1]
-
-        for c in gt_cls:
-            if c in pred_cls:
-                right_count += 1
-            else:
-                wrong_count += 1
                 
-    return right_count / (right_count + wrong_count)
 
 def get_seg_loss(pred, label, ignore_index=255):
     bg_label = label.clone()
@@ -157,7 +141,8 @@ def train(cfg):
     time0 = datetime.datetime.now()
     time0 = time0.replace(microsecond=0)
     
-    train_dataset = voc.VOC12ClsDataset(
+    annotation_file_dir = os.path.join(cfg.dataset.root_dir, "train_cap.pickle")
+    train_dataset = voc.VOC12CapClsDataset(
         root_dir=cfg.dataset.root_dir,
         name_list_dir=cfg.dataset.name_list_dir,
         split=cfg.train.split,
@@ -169,6 +154,7 @@ def train(cfg):
         img_fliplr=True,
         ignore_index=cfg.dataset.ignore_index,
         num_classes=cfg.dataset.num_classes,
+        annotation_file=annotation_file_dir
     )
     
     val_dataset = voc.VOC12SegDataset(
@@ -235,6 +221,11 @@ def train(cfg):
                 "lr": cfg.optimizer.learning_rate*10,
                 "weight_decay": cfg.optimizer.weight_decay,
             },
+            {
+                "params": param_groups[4],
+                "lr": cfg.optimizer.learning_rate*10,
+                "weight_decay": cfg.optimizer.weight_decay,
+            }
         ],
         lr = cfg.optimizer.learning_rate,
         weight_decay = cfg.optimizer.weight_decay,
@@ -249,17 +240,19 @@ def train(cfg):
     train_loader_iter = iter(train_loader)
 
     avg_meter = AverageMeter()
+    
+    mcl_loss = MultiLabelCLLoss(gamma=1.0)
 
 
     for n_iter in range(cfg.train.max_iters):
         
         try:
-            img_name, inputs, cls_labels, img_box = next(train_loader_iter)
+            img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
         except:
             train_loader_iter = iter(train_loader)
-            img_name, inputs, cls_labels, img_box = next(train_loader_iter)
+            img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
 
-        segs, cam, attn_pred, cls_logits = WeCLIP_model(inputs.cuda(), img_name)
+        segs, cam, attn_pred, cls_logits = WeCLIP_model(inputs.cuda(), img_name, captions)
 
         pseudo_label = cam
 
@@ -273,12 +266,13 @@ def train(cfg):
 
         seg_loss = get_seg_loss(segs, pseudo_label.type(torch.long), ignore_index=cfg.dataset.ignore_index)
         
-        
+        cls_loss = F.multilabel_soft_margin_loss(cls_logits, cls_labels.cuda())
+
 
         loss = 1 * seg_loss + 0.1*attn_loss
 
 
-        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item()})
+        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item(), 'cls_loss': cls_loss.item()})
 
         optimizer.zero_grad()
         loss.backward()
@@ -295,9 +289,9 @@ def train(cfg):
             seg_mAcc = (preds==gts).sum()/preds.size
 
 
-            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), seg_mAcc))
+            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, cls_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), avg_meter.pop("cls_loss"), seg_mAcc))
 
-            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item()}, global_step=n_iter)
+            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item(), "cls_loss": cls_loss.item()}, global_step=n_iter)
 
         
         if (n_iter + 1) % cfg.train.eval_iters == 0:

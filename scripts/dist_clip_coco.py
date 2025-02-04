@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from datasets import coco
-from utils.losses import get_aff_loss
+from utils.losses import get_aff_loss, MultiLabelCLLoss
 from utils import evaluate
 from utils.AverageMeter import AverageMeter
 from utils.camutils import cams_to_affinity_label
@@ -265,6 +265,8 @@ def train(cfg):
     train_loader_iter = iter(train_loader)
 
     avg_meter = AverageMeter()
+    
+    mcl_loss = MultiLabelCLLoss(gamma=1.0)
 
 
     for n_iter in range(cfg.train.max_iters):
@@ -288,15 +290,13 @@ def train(cfg):
 
         seg_loss = get_seg_loss(segs, pseudo_label.type(torch.long), ignore_index=cfg.dataset.ignore_index)
         
-        cls_loss = F.multilabel_soft_margin_loss(cls_logits, cls_labels.cuda())
+        cls_loss = mcl_loss(cls_logits, cls_labels.cuda())
 
         if n_iter <= 12000:
             loss = 0 * seg_loss + 0 * attn_loss + 1 * cls_loss
         else:
             loss = 1 * seg_loss + 0.1*attn_loss + 1 * cls_loss
             
-        print("cls_loss", cls_loss)
-        print("map", get_map(cls_labels, cls_logits))
 
         avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item(), 'cls_loss': cls_loss.item()})
 
@@ -325,11 +325,11 @@ def train(cfg):
             logging.info('Validating...')
             if (n_iter + 1) > 40000:
                 torch.save(WeCLIP_model.state_dict(), ckpt_name)
-            seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
-            logging.info("cams score:")
-            logging.info(cam_score)
-            logging.info("segs score:")
-            logging.info(seg_score)
+            # seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
+            # logging.info("cams score:")
+            # logging.info(cam_score)
+            # logging.info("segs score:")
+            # logging.info(seg_score)
 
     return True
 

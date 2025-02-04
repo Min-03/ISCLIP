@@ -56,6 +56,22 @@ def _refine_cams(ref_mod, images, cams, valid_key):
 
     return refined_label.squeeze(0)
 
+class TextFusionTransformer(nn.Module):
+    def __init__(self, embed_dim, heads, layers=2, dropout=0.1):
+        super(TextFusionTransformer, self).__init__()
+        self.multihead_attn = nn.MultiheadAttention(embed_dim, heads, dropout=dropout)
+        self.layer_norm = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.layers = layers
+        self.c = nn.Parameter(torch.tensor(1.0))
+    
+    def forward(self, query, key, value):
+        for _ in range(self.layers):
+            attn_output, _ = self.multihead_attn(query, key, value)
+            attn_output = self.dropout(attn_output)
+            query = self.layer_norm(query + self.c * attn_output)
+        return query
+
 
 class WeCLIP(nn.Module):
     def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda'):
@@ -64,6 +80,7 @@ class WeCLIP(nn.Module):
         self.embedding_dim = embedding_dim
 
         self.encoder, _ = clip.load(clip_model, device=device)
+        self.encoder = self.encoder.to(torch.float32)
 
         for name, param in self.encoder.named_parameters():
             if "11" not in name:
@@ -77,6 +94,8 @@ class WeCLIP(nn.Module):
         self.decoder_fts_fuse = SegFormerHead(in_channels=self.in_channels,embedding_dim=self.embedding_dim,
                                               num_classes=self.num_classes, index=11)
         self.decoder = DecoderTransformer(width=self.embedding_dim, layers=3, heads=8, output_dim=self.num_classes)
+
+        self.fuse_transformer = TextFusionTransformer(embed_dim=512, heads=8, layers=2)
 
         self.bg_text_features = zeroshot_classifier(BACKGROUND_CATEGORY, ['a clean origami {}.'], self.encoder)
         self.fg_text_features = zeroshot_classifier(new_class_names, ['a clean origami {}.'], self.encoder)
@@ -93,18 +112,35 @@ class WeCLIP(nn.Module):
 
     def get_param_groups(self):
 
-        param_groups = [[], [], [], []]  # backbone; backbone_norm; cls_head; seg_head;
+        param_groups = [[], [], [], [], []]  # backbone; backbone_norm; cls_head; seg_head; fuse_transformer
 
         for param in list(self.decoder.parameters()):
             param_groups[3].append(param)
         for param in list(self.decoder_fts_fuse.parameters()):
             param_groups[3].append(param)
 
+        for param in list(self.fuse_transformer.parameters()):
+            param_groups[4].append(param)
+
         return param_groups
+    
+    def refine_text(self, caption):
+        """
+        input
+        caption : single caption feature (1, clip_dim)
+        
+        output
+        fg_text_features : (fg_num, clip_dim)
+        bg_text_features : (bg_num, clip_dim)
+        """
+        caption = caption.cuda().to(torch.float32)
+        fg_text_features = self.fuse_transformer(self.fg_text_features.cuda().to(torch.float32), caption, caption)
+        bg_text_features = self.fuse_transformer(self.bg_text_features.cuda().to(torch.float32), caption, caption)
+        return fg_text_features, bg_text_features
     
 
 
-    def forward(self, img, img_names='2007_000032', mode='train'):
+    def forward(self, img, img_names='2007_000032', captions=None, mode='train'):
         cam_list = []
         cls_logits = []
         b, c, h, w = img.shape
@@ -116,7 +152,7 @@ class WeCLIP(nn.Module):
         fts_all_stack = torch.stack(fts_all, dim=0) # (11, hw, b, c)
         attn_weight_stack = torch.stack(attn_weight_list, dim=0).permute(1, 0, 2, 3)
         if self.require_all_fts==True:
-            cam_fts_all = fts_all_stack[-1].unsqueeze(0).permute(2, 1, 0, 3) #(1, hw, 1, c)
+            cam_fts_all = fts_all_stack[-1].unsqueeze(0).permute(2, 1, 0, 3) #(b, hw, 1, c)
         else:
             cam_fts_all = fts_all_stack.permute(2, 1, 0, 3)
 
@@ -137,6 +173,9 @@ class WeCLIP(nn.Module):
         attn_pred = attn_fts_flatten.transpose(2, 1).bmm(attn_fts_flatten)
         attn_pred = torch.sigmoid(attn_pred)
 
+        if mode == 'train':
+            caption_feats = zeroshot_classifier(captions, [''], self.encoder)
+            
         for i, img_name in enumerate(img_names):
             img_path = os.path.join(self.root_path, str(img_name)+'.png')
             img_i = img[i]
@@ -144,13 +183,19 @@ class WeCLIP(nn.Module):
             cam_attn = attn_weight_stack[i]
             seg_attn = attn_pred.unsqueeze(0)[:, i, :, :]
             
+            if mode == 'train':
+                cap_feat = caption_feats[i]
+                fg_text_feats, bg_text_feats = self.refine_text(cap_feat.unsqueeze(0))
+            else:
+                fg_text_feats, bg_text_feats = self.fg_text_features, self.bg_text_features
+            
             if self.iter_num > 15000 or mode=='val': #15000
                 require_seg_trans = True
             else:
                 require_seg_trans = False
 
             cam_refined_list, keys, w, h = perform_single_voc_cam(img_path, img_i, cam_fts, cam_attn, seg_attn,
-                                                                   self.bg_text_features, self.fg_text_features,
+                                                                   bg_text_feats, fg_text_feats,
                                                                    self.grad_cam,
                                                                    mode=mode,
                                                                    require_seg_trans=require_seg_trans)
@@ -171,7 +216,7 @@ class WeCLIP(nn.Module):
             
             cam_list.append(cam_labels)
             
-            cls_logit, _ = self.encoder.forward_last_layer(cam_fts, self.fg_text_features)
+            cls_logit, _ = self.encoder.forward_last_layer(cam_fts, self.fg_text_features, do_softmax=False)
             cls_logits.append(cls_logit.squeeze(0))
 
         all_cam_labels = torch.stack(cam_list, dim=0)
