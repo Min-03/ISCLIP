@@ -271,7 +271,7 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
 
-        segs, cam, attn_pred, prompts = WeCLIP_model(inputs.cuda(), img_name, captions)
+        segs, cam, attn_pred, prompts = WeCLIP_model(inputs.cuda(), img_name, captions, requires_prompt=True)
 
         pseudo_label = cam
 
