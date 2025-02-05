@@ -31,6 +31,9 @@ parser.add_argument("--seg_detach", action="store_true", help="detach seg")
 parser.add_argument("--work_dir", default=None, type=str, help="work_dir")
 parser.add_argument("--radius", default=8, type=int, help="radius")
 parser.add_argument("--crop_size", default=320, type=int, help="crop_size")
+parser.add_argument("--ft_layers", default=2, type=int, help="number of layers in fusion transformer")
+parser.add_argument("--num_workers", default=10, type=int, help="num_workers for dataloader")
+parser.add_argument("--m_weight", default=0.1, type=float, help="loss weight for matching loss")
 
 
 def setup_seed(seed):
@@ -80,7 +83,7 @@ def validate(model=None, data_loader=None, cfg=None):
         inputs = inputs.cuda()
         labels = labels.cuda()
 
-        segs, cam, attn_loss = model(inputs, name, mode='val')
+        segs, cam, attn_loss, prompts = model(inputs, name, mode='val')
 
         resized_segs = F.interpolate(segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
 
@@ -133,15 +136,32 @@ def get_mask_by_radius(h=20, w=20, radius=8):
     return mask
 
 
+def get_contrast_loss(org_prompts, refined_prompts):
+    """
+    Args:
+        org_prompts (F+B, H): original class prompts
+        refined_prompts (bs, F+B, H) refined class prompts
+
+    Returns:
+        matching loss for two prompts
+    """
+    B, C, H = refined_prompts.shape
+    
+    org_prompts = F.normalize(org_prompts, dim=-1)
+    refined_prompts = F.normalize(refined_prompts, dim=-1)
+    logits = torch.matmul(refined_prompts, org_prompts.T)
+    gt = torch.eye(C).cuda().unsqueeze(0).expand(B, C, C)
+    return F.cross_entropy(logits, gt)
+
+
 
 def train(cfg):
 
-    num_workers = 10
+    num_workers = args.num_workers
     
     time0 = datetime.datetime.now()
     time0 = time0.replace(microsecond=0)
     
-    annotation_file_dir = os.path.join(cfg.dataset.root_dir, "train_cap.pickle")
     train_dataset = voc.VOC12CapClsDataset(
         root_dir=cfg.dataset.root_dir,
         name_list_dir=cfg.dataset.name_list_dir,
@@ -154,7 +174,6 @@ def train(cfg):
         img_fliplr=True,
         ignore_index=cfg.dataset.ignore_index,
         num_classes=cfg.dataset.num_classes,
-        annotation_file=annotation_file_dir
     )
     
     val_dataset = voc.VOC12SegDataset(
@@ -171,15 +190,14 @@ def train(cfg):
                               batch_size=cfg.train.samples_per_gpu,
                               shuffle=True,
                               num_workers=num_workers,
-                              pin_memory=False,
-                              drop_last=True,
-                              prefetch_factor=4)
+                              pin_memory=True,
+                              drop_last=True)
 
     val_loader = DataLoader(val_dataset,
                             batch_size=1,
                             shuffle=False,
                             num_workers=num_workers,
-                            pin_memory=False,
+                            pin_memory=True,
                             drop_last=False)
 
     WeCLIP_model = WeCLIP(
@@ -188,9 +206,10 @@ def train(cfg):
         embedding_dim=cfg.clip_init.embedding_dim,
         in_channels=cfg.clip_init.in_channels,
         dataset_root_path=cfg.dataset.root_dir,
-        device='cuda'
+        device='cuda',
+        n_layers=args.ft_layers
     )
-    logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
+    # logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = WeCLIP_model.get_param_groups()
     WeCLIP_model.cuda()
 
@@ -235,7 +254,7 @@ def train(cfg):
         warmup_ratio = cfg.scheduler.warmup_ratio,
         power = cfg.scheduler.power
     )
-    logging.info('\nOptimizer: \n%s' % optimizer)
+    # logging.info('\nOptimizer: \n%s' % optimizer)
 
     train_loader_iter = iter(train_loader)
 
@@ -252,7 +271,7 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
 
-        segs, cam, attn_pred, cls_logits = WeCLIP_model(inputs.cuda(), img_name, captions)
+        segs, cam, attn_pred, prompts = WeCLIP_model(inputs.cuda(), img_name, captions)
 
         pseudo_label = cam
 
@@ -266,13 +285,14 @@ def train(cfg):
 
         seg_loss = get_seg_loss(segs, pseudo_label.type(torch.long), ignore_index=cfg.dataset.ignore_index)
         
-        cls_loss = F.multilabel_soft_margin_loss(cls_logits, cls_labels.cuda())
+        
+        matching_loss = get_contrast_loss(prompts[0], prompts[1])
 
 
-        loss = 1 * seg_loss + 0.1*attn_loss
+        loss = 1 * seg_loss + 0.1*attn_loss + args.m_weight * matching_loss
 
 
-        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item(), 'cls_loss': cls_loss.item()})
+        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item(), 'match_loss': matching_loss.item()})
 
         optimizer.zero_grad()
         loss.backward()
@@ -289,9 +309,9 @@ def train(cfg):
             seg_mAcc = (preds==gts).sum()/preds.size
 
 
-            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, cls_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), avg_meter.pop("cls_loss"), seg_mAcc))
+            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, match_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), avg_meter.pop("match_loss"), seg_mAcc))
 
-            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item(), "cls_loss": cls_loss.item()}, global_step=n_iter)
+            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item(), "match_loss": matching_loss.item()}, global_step=n_iter)
 
         
         if (n_iter + 1) % cfg.train.eval_iters == 0:

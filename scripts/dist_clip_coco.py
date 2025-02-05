@@ -125,16 +125,12 @@ def get_map(label, out):
 
 
 def get_seg_loss(pred, label, ignore_index=255):
-    ce = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction='none')
     bg_label = label.clone()
     bg_label[label!=0] = ignore_index
-    bg_cnt = (bg_label != ignore_index).long().sum()
-    bg_loss = ce(pred, bg_label.type(torch.long)).sum() / (bg_cnt + 1e-7)
-    
+    bg_loss = F.cross_entropy(pred, bg_label.type(torch.long), ignore_index=ignore_index)
     fg_label = label.clone()
     fg_label[label==0] = ignore_index
-    fg_cnt = (fg_label != ignore_index).long().sum()
-    fg_loss = ce(pred, fg_label.type(torch.long)).sum() / (fg_cnt + 1e-7)
+    fg_loss = F.cross_entropy(pred, fg_label.type(torch.long), ignore_index=ignore_index)
 
     return (bg_loss + fg_loss) * 0.5
 

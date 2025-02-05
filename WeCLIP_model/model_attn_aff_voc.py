@@ -74,7 +74,7 @@ class TextFusionTransformer(nn.Module):
 
 
 class WeCLIP(nn.Module):
-    def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda'):
+    def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda', n_layers=2):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -86,16 +86,13 @@ class WeCLIP(nn.Module):
             if "11" not in name:
                 param.requires_grad=False
 
-        for name, param in self.encoder.named_parameters():
-            print(name, param.requires_grad)
-
         self.in_channels = in_channels
 
         self.decoder_fts_fuse = SegFormerHead(in_channels=self.in_channels,embedding_dim=self.embedding_dim,
                                               num_classes=self.num_classes, index=11)
         self.decoder = DecoderTransformer(width=self.embedding_dim, layers=3, heads=8, output_dim=self.num_classes)
 
-        self.fuse_transformer = TextFusionTransformer(embed_dim=512, heads=8, layers=2)
+        self.fuse_transformer = TextFusionTransformer(embed_dim=512, heads=8, layers=n_layers)
 
         self.bg_text_features = zeroshot_classifier(BACKGROUND_CATEGORY, ['a clean origami {}.'], self.encoder)
         self.fg_text_features = zeroshot_classifier(new_class_names, ['a clean origami {}.'], self.encoder)
@@ -140,9 +137,9 @@ class WeCLIP(nn.Module):
     
 
 
-    def forward(self, img, img_names='2007_000032', captions=None, mode='train'):
+    def forward(self, img, img_names='2007_000032', captions=None, mode='train', requires_prompt=False):
         cam_list = []
-        cls_logits = []
+        prompts_list = []
         b, c, h, w = img.shape
         self.encoder.eval()
         self.iter_num += 1
@@ -216,12 +213,18 @@ class WeCLIP(nn.Module):
             
             cam_list.append(cam_labels)
             
-            cls_logit, _ = self.encoder.forward_last_layer(cam_fts, self.fg_text_features, do_softmax=False)
-            cls_logits.append(cls_logit.squeeze(0))
-
+            
+            refined_prompts = torch.cat((fg_text_feats, bg_text_feats), dim=0)
+            prompts_list.append(refined_prompts)
+            
         all_cam_labels = torch.stack(cam_list, dim=0)
-        cls_logits = torch.stack(cls_logits, dim=0)
 
-        return seg, all_cam_labels, attn_pred, cls_logits
+        if not requires_prompt:
+            return seg, all_cam_labels, attn_pred
+        
+        all_refined_prompts = torch.stack(prompts_list, dim=0)
+        prompts_org = torch.cat((self.fg_text_features, self.bg_text_features), dim=0).to(torch.float32).detach()
+        prompts = [prompts_org, all_refined_prompts]
+        return seg, all_cam_labels, attn_pred, prompts
 
         

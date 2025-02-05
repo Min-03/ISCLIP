@@ -73,7 +73,7 @@ class TextFusionTransformer(nn.Module):
     
 
 class WeCLIP(nn.Module):
-    def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda'):
+    def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda', n_layers=2):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -93,8 +93,8 @@ class WeCLIP(nn.Module):
 
         self.target_layers = [self.encoder.visual.transformer.resblocks[-1].ln_1]
         self.grad_cam = GradCAM(model=self.encoder, target_layers=self.target_layers, reshape_transform=reshape_transform)
-        
-        self.fuse_transformer = TextFusionTransformer(embed_dim=512, heads=8, layers=2)
+
+        self.fuse_transformer = TextFusionTransformer(embed_dim=512, heads=8, layers=n_layers)
 
         self.root_path = os.path.join(dataset_root_path, 'SegmentationClass')
 

@@ -25,6 +25,8 @@ parser.add_argument("--bkg_score", default=0.45, type=float, help="bkg_score")
 parser.add_argument("--resize_long", default=512, type=int, help="resize the long side")
 parser.add_argument("--eval_set", default="val", type=str, help="eval_set") #val
 parser.add_argument("--model_path", default="/your/path/WeCLIP/WeCLIP_model_iter_30000.pth", type=str, help="model_path")
+parser.add_argument("--ft_layers", default=2, type=int, help="number of layers in fusion transformer")
+
 
 
 
@@ -188,7 +190,8 @@ def main(cfg):
                      embedding_dim=cfg.clip_init.embedding_dim,
                      in_channels=cfg.clip_init.in_channels,
                      dataset_root_path=cfg.dataset.root_dir,
-                     device='cuda')
+                     device='cuda',
+                     n_layers=args.ft_layers)
     
     trained_state_dict = torch.load(args.model_path, map_location="cpu")
 
