@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from .segformer_head import SegFormerHead
 import numpy as np
 import clip
+import fuse_transformer
 from clip.clip_text import new_class_names, BACKGROUND_CATEGORY
 from pytorch_grad_cam import GradCAM
 from clip.clip_tool import generate_cam_label, generate_clip_fts, perform_single_voc_cam
@@ -11,6 +12,9 @@ import os
 from torchvision.transforms import Compose, Normalize
 from .Decoder.TransDecoder import DecoderTransformer
 from WeCLIP_model.PAR import PAR
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk import pos_tag, RegexpParser
 
 
 
@@ -55,26 +59,11 @@ def _refine_cams(ref_mod, images, cams, valid_key):
     refined_label = valid_key[refined_label]
 
     return refined_label.squeeze(0)
-
-class TextFusionTransformer(nn.Module):
-    def __init__(self, embed_dim, heads, layers=2, dropout=0.1):
-        super(TextFusionTransformer, self).__init__()
-        self.multihead_attn = nn.MultiheadAttention(embed_dim, heads, dropout=dropout)
-        self.layer_norm = nn.LayerNorm(embed_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.layers = layers
-        self.c = nn.Parameter(torch.tensor(1.0))
     
-    def forward(self, query, key, value):
-        for _ in range(self.layers):
-            attn_output, _ = self.multihead_attn(query, key, value)
-            attn_output = self.dropout(attn_output)
-            query = self.layer_norm(query + self.c * attn_output)
-        return query
-
 
 class WeCLIP(nn.Module):
-    def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda', n_layers=2):
+    def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda', 
+                 n_layers=2, match_ratio=0.75, fuse_ver=1):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -92,7 +81,9 @@ class WeCLIP(nn.Module):
                                               num_classes=self.num_classes, index=11)
         self.decoder = DecoderTransformer(width=self.embedding_dim, layers=3, heads=8, output_dim=self.num_classes)
 
-        self.fuse_transformer = TextFusionTransformer(embed_dim=512, heads=8, layers=n_layers)
+        fuse_trans_name = f"TextFuseTransformer_ver{fuse_ver}"
+        self.fuse_transformer_fg = getattr(fuse_transformer, fuse_trans_name)(embed_dim=512, heads=8, layers=n_layers)
+        self.fuse_transformer_bg = getattr(fuse_transformer, fuse_trans_name)(embed_dim=512, heads=8, layers=n_layers)
 
         self.bg_text_features = zeroshot_classifier(BACKGROUND_CATEGORY, ['a clean origami {}.'], self.encoder)
         self.fg_text_features = zeroshot_classifier(new_class_names, ['a clean origami {}.'], self.encoder)
@@ -105,6 +96,10 @@ class WeCLIP(nn.Module):
         self.par = PAR(num_iter=20, dilations=[1,2,4,8,12,24]).cuda()
         self.iter_num = 0
         self.require_all_fts = True
+        
+        grammar = "ADJ_NOUN: {<DT>?<JJ>*<NN|NNS>+}"
+        self.chunk_parser = RegexpParser(grammar)
+        self.match_ratio = match_ratio
 
 
     def get_param_groups(self):
@@ -116,26 +111,76 @@ class WeCLIP(nn.Module):
         for param in list(self.decoder_fts_fuse.parameters()):
             param_groups[3].append(param)
 
-        for param in list(self.fuse_transformer.parameters()):
+        for param in list(self.fuse_transformer_fg.parameters()):
             param_groups[4].append(param)
-
+        for param in list(self.fuse_transformer_bg.parameters()):
+            param_groups[4].append(param)
+            
         return param_groups
     
     def refine_text(self, caption):
         """
         input
-        caption : single caption feature (1, clip_dim)
+        caption : single caption string
         
         output
         fg_text_features : (fg_num, clip_dim)
         bg_text_features : (bg_num, clip_dim)
         """
-        caption = caption.cuda().to(torch.float32)
-        fg_text_features = self.fuse_transformer(self.fg_text_features.cuda().to(torch.float32), caption, caption)
-        bg_text_features = self.fuse_transformer(self.bg_text_features.cuda().to(torch.float32), caption, caption)
+        caption_feat = zeroshot_classifier([caption], [''], self.encoder)
+        caption_feat = caption_feat.cuda().to(torch.float32).detach()
+        
+        words = word_tokenize(caption)
+        tagged_words = pos_tag(words)
+        tree = self.chunk_parser.parse(tagged_words)
+        phrases = [" ".join(word for word, tag in subtree.leaves()) for subtree in tree.subtrees() if subtree.label() == "ADJ_NOUN"]
+        
+        if len(phrases) == 0:
+            fg_text_features = self.fg_text_features.cuda().detach().to(torch.float32)
+            bg_text_features = self.fuse_transformer_bg(self.bg_text_features.cuda().detach().to(torch.float32), caption_feat, caption_feat)
+            return fg_text_features, bg_text_features
+            
+        parsed_caption_feat = zeroshot_classifier(phrases, ['a clean origami {}.'], self.encoder).detach().cuda().to(torch.float32)
+        sim = torch.matmul(parsed_caption_feat, self.fg_text_features.T).detach() #(pnum, F)
+        match_sim, match_idxs = torch.max(sim, dim=1)
+        
+        fg_num = self.fg_text_features.shape[0]
+        refine_idx = [[] for _ in range(fg_num)]
+        fg_text_feat_list = []
+        for i in range(len(phrases)):
+            if match_sim[i] < self.match_ratio:
+                continue
+            refine_idx[match_idxs[i]].append(i)
+            
+        for i in range(fg_num):
+            if len(refine_idx[i]) == 0:
+                fg_text_feat_list.append(self.fg_text_features[i].cuda().detach().to(torch.float32))
+            else:
+                ref_cap_list = [parsed_caption_feat[idx] for idx in refine_idx[i]]
+                ref_caps = torch.stack(ref_cap_list, dim=0)
+                refined_feat = self.fuse_transformer_fg(self.fg_text_features[i].cuda().detach().to(torch.float32).unsqueeze(0), ref_caps, ref_caps)
+                fg_text_feat_list.append(refined_feat.squeeze(0))
+        fg_text_features = torch.stack(fg_text_feat_list, dim=0)
+        bg_text_features = self.fuse_transformer_bg(self.bg_text_features.cuda().detach().to(torch.float32), caption_feat, caption_feat)
         return fg_text_features, bg_text_features
     
-
+    def refine_text_with_img(self, cam_fts):
+        """
+        input
+        img_feat : single cam feature (hw, 1, clip_dim)
+        
+        output
+        fg_text_features : (fg_num, clip_dim)
+        bg_text_features : (bg_num, clip_dim)
+        """
+        self.grad_cam.activations_and_grads.release()
+        with torch.no_grad():
+            logits, _, img_feature = self.encoder.forward_last_layer(cam_fts, self.fg_text_features, require_img=True)
+            img_feature = img_feature.to(torch.float32)
+        self.grad_cam.activations_and_grads.register(self.target_layers)
+        fg_text_features = self.fuse_transformer_fg(self.fg_text_features.cuda().detach().to(torch.float32), img_feature, img_feature)
+        bg_text_features = self.fuse_transformer_bg(self.bg_text_features.cuda().detach().to(torch.float32), img_feature, img_feature)
+        return fg_text_features, bg_text_features
 
     def forward(self, img, img_names='2007_000032', captions=None, mode='train', requires_prompt=False):
         cam_list = []
@@ -169,9 +214,6 @@ class WeCLIP(nn.Module):
         attn_fts_flatten = attn_fts.reshape(f_b, f_c, f_h*f_w)
         attn_pred = attn_fts_flatten.transpose(2, 1).bmm(attn_fts_flatten)
         attn_pred = torch.sigmoid(attn_pred)
-
-        if mode == 'train':
-            caption_feats = zeroshot_classifier(captions, [''], self.encoder)
             
         for i, img_name in enumerate(img_names):
             img_path = os.path.join(self.root_path, str(img_name)+'.png')
@@ -181,8 +223,11 @@ class WeCLIP(nn.Module):
             seg_attn = attn_pred.unsqueeze(0)[:, i, :, :]
             
             if mode == 'train':
-                cap_feat = caption_feats[i]
-                fg_text_feats, bg_text_feats = self.refine_text(cap_feat.unsqueeze(0))
+                if captions is None:
+                    fg_text_feats, bg_text_feats = self.refine_text_with_img(cam_fts)
+                else:
+                    caption = captions[i]
+                    fg_text_feats, bg_text_feats = self.refine_text(caption)
             else:
                 fg_text_feats, bg_text_feats = self.fg_text_features, self.bg_text_features
             

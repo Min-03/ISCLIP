@@ -403,8 +403,8 @@ class CLIP(nn.Module):
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
         return x
-
-    def forward_last_layer(self, image_features, text_features, do_softmax=True):
+    
+    def forward_last_layer(self, image_features, text_features, do_softmax=True, require_img=False):
         x, attn_weight = self.visual.transformer.resblocks[self.visual.transformer.layers-1](image_features)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
@@ -430,7 +430,10 @@ class CLIP(nn.Module):
         
         logits_per_image = logits_per_image.softmax(dim=-1)
 
-        return logits_per_image, attn_weight
+        if require_img:
+            return logits_per_image, attn_weight, image_features
+        else:
+            return logits_per_image, attn_weight
 
     def forward(self, image, text):
         image_features, feature_map, cls_attn = self.encode_image(image)

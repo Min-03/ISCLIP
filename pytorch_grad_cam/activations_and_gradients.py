@@ -49,3 +49,12 @@ class ActivationsAndGradients:
     def release(self):
         for handle in self.handles:
             handle.remove()
+            
+    def register(self, target_layers):
+        for target_layer in target_layers:
+            self.handles.append(
+                target_layer.register_forward_hook(self.save_activation))
+            # Because of https://github.com/pytorch/pytorch/issues/61519,
+            # we don't use backward hook to record gradients.
+            self.handles.append(
+                target_layer.register_forward_hook(self.save_gradient))

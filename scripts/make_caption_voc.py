@@ -15,6 +15,10 @@ from omegaconf import OmegaConf
 from transformers import Blip2Processor, Blip2ForConditionalGeneration
 from PIL import Image
 import pickle
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk import pos_tag, RegexpParser
+import matplotlib.pyplot as plt
 
 
 parser = argparse.ArgumentParser()
@@ -73,11 +77,29 @@ def make_caption(cfg):
     with open(caption_file_dir, "rb") as fr:
         name2cap = pickle.load(fr)
 
-    save_dir = "/data/dataset/VOC2012/Captions"
+    save_dir = "/data/dataset/VOC2012/ParsedCaptions"
+    grammar = "ADJ_NOUN: {<DT>?<JJ>*<NN|NNS>+}"
+    chunk_parser = RegexpParser(grammar)
+    problems = ["a white and brown puppy\n", "a boy holding two fish\n", "two sheep standing next to each other\n", "a pelican with its young\n"]
+    
     for name, caption in tqdm(name2cap.items()):
-        file_name = os.path.join(save_dir, f"{name}.txt")
-        with open(file_name, "w", encoding="utf-8") as f:
-            f.write(caption)
+        words = word_tokenize(caption)
+        tagged_words = pos_tag(words)
+
+        tree = chunk_parser.parse(tagged_words)
+        if caption in problems:
+            tree.pretty_print()          # Print tree as text
+
+        phrases = [" ".join(word for word, tag in subtree.leaves()) for subtree in tree.subtrees() if subtree.label() == "ADJ_NOUN"]
+        # if len(phrases) == 0:
+        #     print(name, caption)
+        # file_name = os.path.join(save_dir, f"{name}.txt")
+        # with open(file_name, "w", encoding="utf-8") as f:
+
+            
+        #     parsed_caption = "#".join(phrases)
+        #     # f.write(parsed_caption)
+    
     
         
         

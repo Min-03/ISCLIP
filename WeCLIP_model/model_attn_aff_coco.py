@@ -210,6 +210,8 @@ class WeCLIP(nn.Module):
 
             cam_list.append(cam_labels)
             
+            print("cam", cam_fts.shape)
+            print("text", fg_text_feats.shape)
             cls_logit, _ = self.encoder.forward_last_layer(cam_fts, fg_text_feats)
             cls_logits.append(cls_logit.squeeze(0))
 

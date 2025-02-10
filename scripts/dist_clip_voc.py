@@ -34,6 +34,9 @@ parser.add_argument("--crop_size", default=320, type=int, help="crop_size")
 parser.add_argument("--ft_layers", default=2, type=int, help="number of layers in fusion transformer")
 parser.add_argument("--num_workers", default=10, type=int, help="num_workers for dataloader")
 parser.add_argument("--m_weight", default=0.1, type=float, help="loss weight for matching loss")
+parser.add_argument("--match_ratio", default=0.75, type=float, help="match raitio used for parsed caption matching")
+parser.add_argument("--refine_with_img", action='store_true', help="whether to refine the text with img")
+parser.add_argument("--fuse_ver", default=1, type=int)
 
 
 def setup_seed(seed):
@@ -83,7 +86,7 @@ def validate(model=None, data_loader=None, cfg=None):
         inputs = inputs.cuda()
         labels = labels.cuda()
 
-        segs, cam, attn_loss, prompts = model(inputs, name, mode='val')
+        segs, cam, attn_loss = model(inputs, name, mode='val')
 
         resized_segs = F.interpolate(segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
 
@@ -207,7 +210,9 @@ def train(cfg):
         in_channels=cfg.clip_init.in_channels,
         dataset_root_path=cfg.dataset.root_dir,
         device='cuda',
-        n_layers=args.ft_layers
+        n_layers=args.ft_layers,
+        match_ratio=args.match_ratio,
+        fuse_ver=args.fuse_ver
     )
     # logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = WeCLIP_model.get_param_groups()
@@ -271,7 +276,8 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
 
-        segs, cam, attn_pred, prompts = WeCLIP_model(inputs.cuda(), img_name, captions, requires_prompt=True)
+        captions = None if args.refine_with_img else captions
+        segs, cam, attn_pred= WeCLIP_model(inputs.cuda(), img_name, captions)
 
         pseudo_label = cam
 
@@ -285,14 +291,11 @@ def train(cfg):
 
         seg_loss = get_seg_loss(segs, pseudo_label.type(torch.long), ignore_index=cfg.dataset.ignore_index)
         
-        
-        matching_loss = get_contrast_loss(prompts[0], prompts[1])
+
+        loss = 1 * seg_loss + 0.1*attn_loss
 
 
-        loss = 1 * seg_loss + 0.1*attn_loss + args.m_weight * matching_loss
-
-
-        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item(), 'match_loss': matching_loss.item()})
+        avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item()})
 
         optimizer.zero_grad()
         loss.backward()
@@ -309,9 +312,9 @@ def train(cfg):
             seg_mAcc = (preds==gts).sum()/preds.size
 
 
-            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, match_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), avg_meter.pop("match_loss"), seg_mAcc))
+            logging.info("Iter: %d; Elasped: %s; ETA: %s; LR: %.3e;, pseudo_seg_loss: %.4f, attn_loss: %.4f, pseudo_seg_mAcc: %.4f"%(n_iter+1, delta, eta, cur_lr, avg_meter.pop('seg_loss'), avg_meter.pop('attn_loss'), seg_mAcc))
 
-            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item(), "match_loss": matching_loss.item()}, global_step=n_iter)
+            writer.add_scalars('train/loss',  {"seg_loss": seg_loss.item(), "attn_loss": attn_loss.item()}, global_step=n_iter)
 
         
         if (n_iter + 1) % cfg.train.eval_iters == 0:
