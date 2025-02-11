@@ -4,11 +4,12 @@ import torch.nn.functional as F
 from .segformer_head import SegFormerHead
 import numpy as np
 import clip
-import fuse_transformer
+from .fuse_transformer import TextFusionTransformer_ver1, TextFusionTransformer_ver2, TextFusionTransformer_ver3, TextFusionTransformer_ver4
 from clip.clip_text import new_class_names, BACKGROUND_CATEGORY
 from pytorch_grad_cam import GradCAM
 from clip.clip_tool import generate_cam_label, generate_clip_fts, perform_single_voc_cam
 import os
+import sys
 from torchvision.transforms import Compose, Normalize
 from .Decoder.TransDecoder import DecoderTransformer
 from WeCLIP_model.PAR import PAR
@@ -63,7 +64,7 @@ def _refine_cams(ref_mod, images, cams, valid_key):
 
 class WeCLIP(nn.Module):
     def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda', 
-                 n_layers=2, match_ratio=0.75, fuse_ver=1):
+                 n_layers=2, match_ratio=0.75, fuse_ver=1, fuse_mode="txt", max_refine_iter=15000):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -81,9 +82,9 @@ class WeCLIP(nn.Module):
                                               num_classes=self.num_classes, index=11)
         self.decoder = DecoderTransformer(width=self.embedding_dim, layers=3, heads=8, output_dim=self.num_classes)
 
-        fuse_trans_name = f"TextFuseTransformer_ver{fuse_ver}"
-        self.fuse_transformer_fg = getattr(fuse_transformer, fuse_trans_name)(embed_dim=512, heads=8, layers=n_layers)
-        self.fuse_transformer_bg = getattr(fuse_transformer, fuse_trans_name)(embed_dim=512, heads=8, layers=n_layers)
+        fuse_trans_dict = {1:TextFusionTransformer_ver1, 2:TextFusionTransformer_ver2, 3:TextFusionTransformer_ver3, 4:TextFusionTransformer_ver4}
+        self.fuse_transformer_fg = fuse_trans_dict.get(fuse_ver)(embed_dim=512, heads=8, layers=n_layers)
+        self.fuse_transformer_bg = fuse_trans_dict.get(fuse_ver)(embed_dim=512, heads=8, layers=n_layers)
 
         self.bg_text_features = zeroshot_classifier(BACKGROUND_CATEGORY, ['a clean origami {}.'], self.encoder)
         self.fg_text_features = zeroshot_classifier(new_class_names, ['a clean origami {}.'], self.encoder)
@@ -100,6 +101,9 @@ class WeCLIP(nn.Module):
         grammar = "ADJ_NOUN: {<DT>?<JJ>*<NN|NNS>+}"
         self.chunk_parser = RegexpParser(grammar)
         self.match_ratio = match_ratio
+        assert fuse_mode in ["txt", "txt_parsed", "img"], f"{fuse_mode} for refine text is not supported"
+        self.fuse_mode = fuse_mode
+        self.max_refine_iter = max_refine_iter
 
 
     def get_param_groups(self):
@@ -123,6 +127,22 @@ class WeCLIP(nn.Module):
         input
         caption : single caption string
         
+        output :
+        fg_text_features : (fg_num, clip_dim)
+        bg_text_features : (bg_num, clip_dim)
+        """
+        caption_feat = zeroshot_classifier([caption], [''], self.encoder)
+        caption_feat = caption_feat.cuda().to(torch.float32).detach()
+        
+        fg_text_features = self.fuse_transformer_fg(self.fg_text_features.cuda().detach().to(torch.float32), caption_feat, caption_feat)
+        bg_text_features = self.fuse_transformer_bg(self.bg_text_features.cuda().detach().to(torch.float32), caption_feat, caption_feat)
+        return fg_text_features, bg_text_features
+    
+    def refine_text_parsed(self, caption):
+        """
+        input
+        caption : single caption string
+        
         output
         fg_text_features : (fg_num, clip_dim)
         bg_text_features : (bg_num, clip_dim)
@@ -136,7 +156,7 @@ class WeCLIP(nn.Module):
         phrases = [" ".join(word for word, tag in subtree.leaves()) for subtree in tree.subtrees() if subtree.label() == "ADJ_NOUN"]
         
         if len(phrases) == 0:
-            fg_text_features = self.fg_text_features.cuda().detach().to(torch.float32)
+            fg_text_features = self.fuse_transformer_fg(self.fg_text_features.cuda().detach().to(torch.float32), caption_feat, caption_feat)
             bg_text_features = self.fuse_transformer_bg(self.bg_text_features.cuda().detach().to(torch.float32), caption_feat, caption_feat)
             return fg_text_features, bg_text_features
             
@@ -182,6 +202,7 @@ class WeCLIP(nn.Module):
         bg_text_features = self.fuse_transformer_bg(self.bg_text_features.cuda().detach().to(torch.float32), img_feature, img_feature)
         return fg_text_features, bg_text_features
 
+    
     def forward(self, img, img_names='2007_000032', captions=None, mode='train', requires_prompt=False):
         cam_list = []
         prompts_list = []
@@ -223,15 +244,18 @@ class WeCLIP(nn.Module):
             seg_attn = attn_pred.unsqueeze(0)[:, i, :, :]
             
             if mode == 'train':
-                if captions is None:
+                if self.fuse_mode=="img":
                     fg_text_feats, bg_text_feats = self.refine_text_with_img(cam_fts)
-                else:
+                elif self.fuse_mode=="txt":
                     caption = captions[i]
                     fg_text_feats, bg_text_feats = self.refine_text(caption)
+                else:
+                    caption = captions[i]
+                    fg_text_feats, bg_text_feats = self.refine_text_parsed(caption)
             else:
                 fg_text_feats, bg_text_feats = self.fg_text_features, self.bg_text_features
             
-            if self.iter_num > 15000 or mode=='val': #15000
+            if self.iter_num > self.max_refine_iter or mode=='val': #15000
                 require_seg_trans = True
             else:
                 require_seg_trans = False
@@ -242,7 +266,6 @@ class WeCLIP(nn.Module):
                                                                    mode=mode,
                                                                    require_seg_trans=require_seg_trans)
 
-
             cam_dict = generate_cam_label(cam_refined_list, keys, w, h)
             
             cams = cam_dict['refined_cam'].cuda()
@@ -252,7 +275,6 @@ class WeCLIP(nn.Module):
             
             valid_key = np.pad(cam_dict['keys'] + 1, (1, 0), mode='constant')
             valid_key = torch.from_numpy(valid_key).cuda()
-            
             with torch.no_grad():
                 cam_labels = _refine_cams(self.par, img[i], cams, valid_key)
             

@@ -35,8 +35,9 @@ parser.add_argument("--ft_layers", default=2, type=int, help="number of layers i
 parser.add_argument("--num_workers", default=10, type=int, help="num_workers for dataloader")
 parser.add_argument("--m_weight", default=0.1, type=float, help="loss weight for matching loss")
 parser.add_argument("--match_ratio", default=0.75, type=float, help="match raitio used for parsed caption matching")
-parser.add_argument("--refine_with_img", action='store_true', help="whether to refine the text with img")
 parser.add_argument("--fuse_ver", default=1, type=int)
+parser.add_argument("--fuse_mode", default="txt", type=str)
+parser.add_argument("--refine_always", action="store_true")
 
 
 def setup_seed(seed):
@@ -202,7 +203,7 @@ def train(cfg):
                             num_workers=num_workers,
                             pin_memory=True,
                             drop_last=False)
-
+    max_refine_iter = cfg.train.max_iters if args.refine_always else 15000
     WeCLIP_model = WeCLIP(
         num_classes=cfg.dataset.num_classes,
         clip_model=cfg.clip_init.clip_pretrain_path,
@@ -212,7 +213,9 @@ def train(cfg):
         device='cuda',
         n_layers=args.ft_layers,
         match_ratio=args.match_ratio,
-        fuse_ver=args.fuse_ver
+        fuse_ver=args.fuse_ver,
+        fuse_mode=args.fuse_mode,
+        max_refine_iter=max_refine_iter
     )
     # logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = WeCLIP_model.get_param_groups()
@@ -276,7 +279,6 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
 
-        captions = None if args.refine_with_img else captions
         segs, cam, attn_pred= WeCLIP_model(inputs.cuda(), img_name, captions)
 
         pseudo_label = cam

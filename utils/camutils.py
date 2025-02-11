@@ -235,7 +235,7 @@ def cams_to_affinity_label(cam_label, mask=None, ignore_index=255):
     _cam_label_rep = _cam_label.repeat([1, _cam_label.shape[-1], 1])
     _cam_label_rep_t = _cam_label_rep.permute(0,2,1)
     aff_label = (_cam_label_rep == _cam_label_rep_t).type(torch.long)
-    #aff_label[(_cam_label_rep+_cam_label_rep_t) == 0] = ignore_index
+    #aff_label[(_cam_label_rep+_cam_label_rep_t) == 0] = ignore_index #whether to ignore background
     for i in range(b):
 
         if mask is not None:
