@@ -32,7 +32,7 @@ parser.add_argument("--ft_layers", default=2, type=int, help="number of layers i
 
 def validate(model, dataset, test_scales=None):
 
-    _preds, _gts, _msc_preds, cams = [], [], [], []
+    _preds, _gts, _msc_preds, cams, msc_cams = [], [], [], [], []
     
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=False)
 
@@ -45,6 +45,7 @@ def validate(model, dataset, test_scales=None):
     _preds_hist = np.zeros((21, 21))
     _msc_preds_hist = np.zeros((21, 21))
     _cams_hist = np.zeros((21, 21))
+    _msc_cams_hist = np.zeros((21, 21))
 
     for idx, data in tqdm(enumerate(data_loader), total=len(data_loader), ncols=100, ascii=" >="):
         num+=1
@@ -66,6 +67,7 @@ def validate(model, dataset, test_scales=None):
         #######
 
         segs_list = []
+        cam_list = []
         inputs_cat = torch.cat([inputs, inputs.flip(-1)], dim=0)
         segs_cat, cam, attn_loss = model(inputs_cat, names, mode = 'val')
         
@@ -87,16 +89,25 @@ def validate(model, dataset, test_scales=None):
                 _segs_cat = F.interpolate(segs_cat, size=(h, w), mode='bilinear', align_corners=False)
                 _segs = (_segs_cat[0,...] + _segs_cat[1,...].flip(-1)) / 2
                 segs_list.append(_segs)
+                
+                _cam_cat = F.interpolate(cam_cat, size=(h, w), mode='bilinear', align_corners=False)
+                _cam = (_cam_cat[0,...] + _cam_cat[1,...].flip(-1)) / 2
+                cam_list.append(_cam)
+                
 
         msc_segs = torch.mean(torch.stack(segs_list, dim=0), dim=0).unsqueeze(0)
+        msc_cam = torch.mean(torch.stack(cam_list, dim=0), dim=0).unsqueeze(0)
 
         resized_segs = F.interpolate(segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
         seg_preds = torch.argmax(resized_segs, dim=1)
 
         resized_msc_segs = F.interpolate(msc_segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
         msc_seg_preds = torch.argmax(resized_msc_segs, dim=1)
+        
+        resized_msc_cam = F.interpolate(msc_cam, size=labels.shape[1:], mode='bilinear', align_corners=False)
 
         cams += list(cam.cpu().numpy().astype(np.int16))
+        msc_cams += list(resized_msc_cam.cpu().numpy().astype(np.int16))
         _preds += list(seg_preds.cpu().numpy().astype(np.int16))
         _msc_preds += list(msc_seg_preds.cpu().numpy().astype(np.int16))
         _gts += list(labels.cpu().numpy().astype(np.int16))
@@ -106,12 +117,13 @@ def validate(model, dataset, test_scales=None):
             _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
             _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
             _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
-            _preds, _gts, _msc_preds, cams = [], [], [], []
+            _msc_cams_hist, msc_cam_score = evaluate.scores(_gts, msc_cams, _msc_cams_hist)
+            _preds, _gts, _msc_preds, cams, msc_cams = [], [], [], [], []
 
 
         np.save(args.work_dir+ '/logit/' + name[0] + '.npy', {"segs":segs.detach().cpu().numpy(), "msc_segs":msc_segs.detach().cpu().numpy()})
             
-    return _gts, _preds, _msc_preds, cams, _preds_hist, _msc_preds_hist, _cams_hist
+    return _gts, _preds, _msc_preds, cams, msc_cams, _preds_hist, _msc_preds_hist, _cams_hist, _msc_cams_hist
 
 
 def crf_proc(config):
@@ -198,15 +210,18 @@ def main(cfg):
     WeCLIP_model.load_state_dict(state_dict=trained_state_dict, strict=False)
     WeCLIP_model.eval()
 
-    gts, preds, msc_preds, cams, preds_hist, msc_preds_hist, cams_hist = validate(model=WeCLIP_model, dataset=val_dataset, test_scales=[1, 0.75])
+    gts, preds, msc_preds, cams, msc_cams, preds_hist, msc_preds_hist, cams_hist, msc_cams_hist = validate(model=WeCLIP_model, dataset=val_dataset, test_scales=[1, 0.75])
     torch.cuda.empty_cache()
 
     preds_hist, seg_score = evaluate.scores(gts, preds, preds_hist)
     msc_preds_hist, msc_seg_score = evaluate.scores(gts, msc_preds, msc_preds_hist)
     cams_hist, cam_score = evaluate.scores(gts, cams, cams_hist)
+    msc_cams_hist, msc_cam_score = evaluate.scores(gts, msc_cams, msc_cams_hist)
 
     print("cams score:")
     print(cam_score)
+    print("msc cam score")
+    print(msc_cam_score)
     print("segs score:")
     print(seg_score)
     print("msc segs score:")
