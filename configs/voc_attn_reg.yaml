@@ -1,6 +1,6 @@
 dataset:
   root_dir: /data/dataset/VOC2012
-  name_list_dir: /home/student/minseo/WeCLIP/datasets/voc
+  name_list_dir: /home/student/minseo/ISCLIP/datasets/voc
   num_classes: 21
   crop_size: 320
   resize_range: [512, 2048]

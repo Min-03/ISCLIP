@@ -13,7 +13,7 @@ from tqdm import tqdm
 import joblib
 from datasets import voc
 from utils import evaluate
-from WeCLIP_model.model_attn_aff_voc import WeCLIP
+from models.model import ISCLIP
 import imageio.v2 as imageio
 parser = argparse.ArgumentParser()
 parser.add_argument("--config",
@@ -78,6 +78,7 @@ def validate(model, dataset, test_scales=None):
         segs_list.append(_segs)
 
         _, _, h, w = segs_cat.shape
+        _, h_c, w_c = cam.shape
 
         for s in test_scales:
             if s != 1.0:
@@ -90,7 +91,7 @@ def validate(model, dataset, test_scales=None):
                 _segs = (_segs_cat[0,...] + _segs_cat[1,...].flip(-1)) / 2
                 segs_list.append(_segs)
                 
-                _cam_cat = F.interpolate(cam_cat, size=(h, w), mode='bilinear', align_corners=False)
+                _cam_cat = F.interpolate(cam_cat.unsqueeze(0), size=(h_c, w_c), mode='bilinear', align_corners=False).squeeze(0)
                 _cam = (_cam_cat[0,...] + _cam_cat[1,...].flip(-1)) / 2
                 cam_list.append(_cam)
                 
@@ -104,7 +105,7 @@ def validate(model, dataset, test_scales=None):
         resized_msc_segs = F.interpolate(msc_segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
         msc_seg_preds = torch.argmax(resized_msc_segs, dim=1)
         
-        resized_msc_cam = F.interpolate(msc_cam, size=labels.shape[1:], mode='bilinear', align_corners=False)
+        resized_msc_cam = F.interpolate(msc_cam.unsqueeze(0), size=labels.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
 
         cams += list(cam.cpu().numpy().astype(np.int16))
         msc_cams += list(resized_msc_cam.cpu().numpy().astype(np.int16))
@@ -197,7 +198,7 @@ def main(cfg):
         num_classes=cfg.dataset.num_classes,
     )
 
-    WeCLIP_model = WeCLIP(num_classes=cfg.dataset.num_classes,
+    ISCLIP_model = ISCLIP(num_classes=cfg.dataset.num_classes,
                      clip_model=cfg.clip_init.clip_pretrain_path,
                      embedding_dim=cfg.clip_init.embedding_dim,
                      in_channels=cfg.clip_init.in_channels,
@@ -207,10 +208,10 @@ def main(cfg):
     
     trained_state_dict = torch.load(args.model_path, map_location="cpu")
 
-    WeCLIP_model.load_state_dict(state_dict=trained_state_dict, strict=False)
-    WeCLIP_model.eval()
+    ISCLIP_model.load_state_dict(state_dict=trained_state_dict, strict=False)
+    ISCLIP_model.eval()
 
-    gts, preds, msc_preds, cams, msc_cams, preds_hist, msc_preds_hist, cams_hist, msc_cams_hist = validate(model=WeCLIP_model, dataset=val_dataset, test_scales=[1, 0.75])
+    gts, preds, msc_preds, cams, msc_cams, preds_hist, msc_preds_hist, cams_hist, msc_cams_hist = validate(model=ISCLIP_model, dataset=val_dataset, test_scales=[1, 0.75])
     torch.cuda.empty_cache()
 
     preds_hist, seg_score = evaluate.scores(gts, preds, preds_hist)

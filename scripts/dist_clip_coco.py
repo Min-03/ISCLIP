@@ -20,7 +20,7 @@ from utils import evaluate
 from utils.AverageMeter import AverageMeter
 from utils.camutils import cams_to_affinity_label
 from utils.optimizer import PolyWarmupAdamW
-from WeCLIP_model.model_attn_aff_coco import WeCLIP
+from models.model import ISCLIP
 
 
 parser = argparse.ArgumentParser()
@@ -205,17 +205,23 @@ def train(cfg):
                             drop_last=False)
 
 
-    WeCLIP_model = WeCLIP(
+    max_refine_iter = cfg.train.max_iters if args.refine_always else 40000
+    ISCLIP_model = ISCLIP(
         num_classes=cfg.dataset.num_classes,
         clip_model=cfg.clip_init.clip_pretrain_path,
         embedding_dim=cfg.clip_init.embedding_dim,
         in_channels=cfg.clip_init.in_channels,
         dataset_root_path=cfg.dataset.root_dir,
-        device='cuda'
+        device='cuda',
+        n_layers=args.ft_layers,
+        match_ratio=args.match_ratio,
+        fuse_ver=args.fuse_ver,
+        fuse_mode=args.fuse_mode,
+        max_refine_iter=max_refine_iter
     )
-    logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
-    param_groups = WeCLIP_model.get_param_groups()
-    WeCLIP_model.cuda()
+    logging.info('\nNetwork config: \n%s'%(ISCLIP_model))
+    param_groups = ISCLIP_model.get_param_groups()
+    ISCLIP_model.cuda()
 
     mask_size = int(cfg.dataset.crop_size // 16)
     attn_mask = get_mask_by_radius(h=mask_size, w=mask_size, radius=args.radius)
@@ -273,7 +279,7 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, caption = next(train_loader_iter)
 
-        segs, cam, attn_pred, cls_logits = WeCLIP_model(inputs.cuda(), img_name, caption)
+        segs, cam, attn_pred, cls_logits = ISCLIP_model(inputs.cuda(), img_name, caption)
 
         pseudo_label = cam
 
@@ -317,10 +323,10 @@ def train(cfg):
 
         
         if (n_iter + 1) % cfg.train.eval_iters == 0:
-            ckpt_name = os.path.join(cfg.work_dir.ckpt_dir, "WeCLIP_model_iter_%d.pth"%(n_iter+1))
+            ckpt_name = os.path.join(cfg.work_dir.ckpt_dir, "ISCLIP_model_iter_%d.pth"%(n_iter+1))
             logging.info('Validating...')
             if (n_iter + 1) > 40000:
-                torch.save(WeCLIP_model.state_dict(), ckpt_name)
+                torch.save(ISCLIP_model.state_dict(), ckpt_name)
             # seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
             # logging.info("cams score:")
             # logging.info(cam_score)

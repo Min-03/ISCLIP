@@ -1,6 +1,6 @@
 dataset:
   root_dir: /data/dataset/COCO_seg
-  name_list_dir: /home/student/minseo/WeCLIP/datasets/coco
+  name_list_dir: /home/student/minseo/ISCLIP/datasets/coco
   num_classes: 81
   crop_size: 320
   resize_range: [512, 2048]

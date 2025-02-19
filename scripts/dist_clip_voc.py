@@ -19,7 +19,7 @@ from utils import evaluate
 from utils.AverageMeter import AverageMeter
 from utils.camutils import cams_to_affinity_label
 from utils.optimizer import PolyWarmupAdamW
-from WeCLIP_model.model_attn_aff_voc import WeCLIP
+from models.model import ISCLIP
 
 
 parser = argparse.ArgumentParser()
@@ -38,13 +38,15 @@ parser.add_argument("--match_ratio", default=0.75, type=float, help="match raiti
 parser.add_argument("--fuse_ver", default=1, type=int)
 parser.add_argument("--fuse_mode", default="txt", type=str)
 parser.add_argument("--refine_always", action="store_true")
-
-
+    
 def setup_seed(seed):
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+      torch.cuda.manual_seed(seed)
+      torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
+    torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
 def setup_logger(filename='test.log'):
@@ -80,8 +82,7 @@ def validate(model=None, data_loader=None, cfg=None):
     num = 1
     seg_hist = np.zeros((21, 21))
     cam_hist = np.zeros((21, 21))
-    for _, data in tqdm(enumerate(data_loader),
-                        total=len(data_loader), ncols=100, ascii=" >="):
+    for _, data in enumerate(data_loader):
         name, inputs, labels, cls_label = data
 
         inputs = inputs.cuda()
@@ -101,6 +102,9 @@ def validate(model=None, data_loader=None, cfg=None):
             seg_hist, seg_score = evaluate.scores(gts, preds, seg_hist)
             cam_hist, cam_score = evaluate.scores(gts, cams, cam_hist)
             preds, gts, cams, aff_gts = [], [], [], []
+            
+        if num % 100 == 0:
+            print(f"Done {num} out of {len(data_loader)} img")
 
     seg_hist, seg_score = evaluate.scores(gts, preds, seg_hist)
     cam_hist, cam_score = evaluate.scores(gts, cams, cam_hist)
@@ -204,7 +208,7 @@ def train(cfg):
                             pin_memory=True,
                             drop_last=False)
     max_refine_iter = cfg.train.max_iters if args.refine_always else 15000
-    WeCLIP_model = WeCLIP(
+    ISCLIP_model = ISCLIP(
         num_classes=cfg.dataset.num_classes,
         clip_model=cfg.clip_init.clip_pretrain_path,
         embedding_dim=cfg.clip_init.embedding_dim,
@@ -218,8 +222,8 @@ def train(cfg):
         max_refine_iter=max_refine_iter
     )
     # logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
-    param_groups = WeCLIP_model.get_param_groups()
-    WeCLIP_model.cuda()
+    param_groups = ISCLIP_model.get_param_groups()
+    ISCLIP_model.cuda()
 
 
     mask_size = int(cfg.dataset.crop_size // 16)
@@ -268,7 +272,6 @@ def train(cfg):
 
     avg_meter = AverageMeter()
     
-    mcl_loss = MultiLabelCLLoss(gamma=1.0)
 
 
     for n_iter in range(cfg.train.max_iters):
@@ -279,7 +282,7 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
 
-        segs, cam, attn_pred= WeCLIP_model(inputs.cuda(), img_name, captions)
+        segs, cam, attn_pred= ISCLIP_model(inputs.cuda(), img_name, captions, cls_labels=cls_labels)
 
         pseudo_label = cam
 
@@ -320,11 +323,11 @@ def train(cfg):
 
         
         if (n_iter + 1) % cfg.train.eval_iters == 0:
-            ckpt_name = os.path.join(cfg.work_dir.ckpt_dir, "WeCLIP_model_iter_%d.pth"%(n_iter+1))
+            ckpt_name = os.path.join(cfg.work_dir.ckpt_dir, "ISCLIP_model_iter_%d.pth"%(n_iter+1))
             logging.info('Validating...')
             if (n_iter + 1) > 20000:
-                torch.save(WeCLIP_model.state_dict(), ckpt_name)
-            seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
+                torch.save(ISCLIP_model.state_dict(), ckpt_name)
+            seg_score, cam_score = validate(model=ISCLIP_model, data_loader=val_loader, cfg=cfg)
             logging.info("cams score:")
             logging.info(cam_score)
             logging.info("segs score:")

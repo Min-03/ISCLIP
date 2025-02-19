@@ -3,3 +3,5 @@ nohup/
 pydensecrf/
 nohup*.out
 test*.py
+*_temp.*
+*.out

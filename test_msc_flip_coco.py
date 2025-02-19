@@ -13,7 +13,7 @@ from tqdm import tqdm
 import joblib
 from datasets import coco
 from utils import evaluate
-from WeCLIP_model.model_attn_aff_coco import WeCLIP
+from models.model import ISCLIP
 import imageio.v2 as imageio
 parser = argparse.ArgumentParser()
 parser.add_argument("--config",
@@ -195,7 +195,7 @@ def main(cfg):
         num_classes=cfg.dataset.num_classes,
     )
 
-    WeCLIP_model = WeCLIP(num_classes=cfg.dataset.num_classes,
+    ISCLIP_model = ISCLIP(num_classes=cfg.dataset.num_classes,
                      clip_model=cfg.clip_init.clip_pretrain_path,
                      embedding_dim=cfg.clip_init.embedding_dim,
                      in_channels=cfg.clip_init.in_channels,
@@ -204,10 +204,10 @@ def main(cfg):
     
     trained_state_dict = torch.load(args.model_path, map_location="cpu")
 
-    WeCLIP_model.load_state_dict(state_dict=trained_state_dict, strict=False)
-    WeCLIP_model.eval()
+    ISCLIP_model.load_state_dict(state_dict=trained_state_dict, strict=False)
+    ISCLIP_model.eval()
 
-    gts, preds, msc_preds, cams, preds_hist, msc_preds_hist, cams_hist = validate(model=WeCLIP_model, dataset=val_dataset, test_scales=[1, 0.75])
+    gts, preds, msc_preds, cams, preds_hist, msc_preds_hist, cams_hist = validate(model=ISCLIP_model, dataset=val_dataset, test_scales=[1, 0.75])
     torch.cuda.empty_cache()
 
     preds_hist, seg_score = evaluate.scores(gts, preds, preds_hist, 81)

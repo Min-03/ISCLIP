@@ -5,17 +5,18 @@ from .segformer_head import SegFormerHead
 import numpy as np
 import clip
 from .fuse_transformer import TextFusionTransformer_ver1, TextFusionTransformer_ver2, TextFusionTransformer_ver3, TextFusionTransformer_ver4
-from clip.clip_text import new_class_names, BACKGROUND_CATEGORY
+from clip.clip_text import new_class_names, BACKGROUND_CATEGORY, new_class_names_coco, BACKGROUND_CATEGORY_COCO
 from pytorch_grad_cam import GradCAM
-from clip.clip_tool import generate_cam_label, generate_clip_fts, perform_single_voc_cam
+from clip.clip_tool import generate_cam_label, generate_clip_fts, perform_single_voc_cam, perform_single_coco_cam
 import os
 import sys
 from torchvision.transforms import Compose, Normalize
 from .Decoder.TransDecoder import DecoderTransformer
-from WeCLIP_model.PAR import PAR
+from models.PAR import PAR
 import nltk
 from nltk.tokenize import word_tokenize
 from nltk import pos_tag, RegexpParser
+import pickle
 
 
 
@@ -62,9 +63,9 @@ def _refine_cams(ref_mod, images, cams, valid_key):
     return refined_label.squeeze(0)
     
 
-class WeCLIP(nn.Module):
+class ISCLIP(nn.Module):
     def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda', 
-                 n_layers=2, match_ratio=0.75, fuse_ver=1, fuse_mode="txt", max_refine_iter=15000):
+                 n_layers=2, match_ratio=0.75, fuse_ver=1, fuse_mode="txt", max_refine_iter=15000, dataset="VOC"):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -77,6 +78,8 @@ class WeCLIP(nn.Module):
                 param.requires_grad=False
 
         self.in_channels = in_channels
+        
+        self.dataset = dataset
 
         self.decoder_fts_fuse = SegFormerHead(in_channels=self.in_channels,embedding_dim=self.embedding_dim,
                                               num_classes=self.num_classes, index=11)
@@ -86,8 +89,10 @@ class WeCLIP(nn.Module):
         self.fuse_transformer_fg = fuse_trans_dict.get(fuse_ver)(embed_dim=512, heads=8, layers=n_layers)
         self.fuse_transformer_bg = fuse_trans_dict.get(fuse_ver)(embed_dim=512, heads=8, layers=n_layers)
 
-        self.bg_text_features = zeroshot_classifier(BACKGROUND_CATEGORY, ['a clean origami {}.'], self.encoder)
-        self.fg_text_features = zeroshot_classifier(new_class_names, ['a clean origami {}.'], self.encoder)
+        bg_names = BACKGROUND_CATEGORY if dataset == "VOC" else BACKGROUND_CATEGORY_COCO
+        fg_names = new_class_names if dataset == "VOC" else new_class_names_coco
+        self.bg_text_features = zeroshot_classifier(bg_names, ['a clean origami {}.'], self.encoder)
+        self.fg_text_features = zeroshot_classifier(fg_names, ['a clean origami {}.'], self.encoder)
 
         self.target_layers = [self.encoder.visual.transformer.resblocks[-1].ln_1]
         self.grad_cam = GradCAM(model=self.encoder, target_layers=self.target_layers, reshape_transform=reshape_transform)
@@ -95,15 +100,19 @@ class WeCLIP(nn.Module):
         self.cam_bg_thres = 1
         self.encoder.eval()
         self.par = PAR(num_iter=20, dilations=[1,2,4,8,12,24]).cuda()
+        self.cam_func_dict = {"VOC":perform_single_voc_cam, "COCO":perform_single_coco_cam}
         self.iter_num = 0
         self.require_all_fts = True
         
         grammar = "ADJ_NOUN: {<DT>?<JJ>*<NN|NNS>+}"
         self.chunk_parser = RegexpParser(grammar)
         self.match_ratio = match_ratio
-        assert fuse_mode in ["txt", "txt_parsed", "img"], f"{fuse_mode} for refine text is not supported"
+        assert fuse_mode in ["txt", "cls_txt", "txt_parsed", "img"], f"{fuse_mode} for refine text is not supported"
         self.fuse_mode = fuse_mode
         self.max_refine_iter = max_refine_iter
+        if dataset != "VOC" and max_refine_iter == 15000:
+            raise Exception("Something is wrong with your setting")
+        self.caption_file_dir = "/data/dataset/VOC2012/SpecificCaption" if dataset == "VOC" else "/data/dataset/COCO_seg/SpecificCaption"
 
 
     def get_param_groups(self):
@@ -201,9 +210,39 @@ class WeCLIP(nn.Module):
         fg_text_features = self.fuse_transformer_fg(self.fg_text_features.cuda().detach().to(torch.float32), img_feature, img_feature)
         bg_text_features = self.fuse_transformer_bg(self.bg_text_features.cuda().detach().to(torch.float32), img_feature, img_feature)
         return fg_text_features, bg_text_features
+    
+    def refine_text_specific(self, caption, caption_dir, cls_label):
+        """
+        Args:
+            caption : single caption string
+            caption_dir : directory path where class specific captions stored
+            cls_label (C,) : one hot class label
+        """
+        caption_feat = zeroshot_classifier([caption], [''], self.encoder)
+        caption_feat = caption_feat.cuda().to(torch.float32).detach()
+        
+        with open(caption_dir, "rb") as fr:
+            specific_captions = pickle.load(fr)
+        specific_caption_feats = zeroshot_classifier(list(specific_captions.values()), [''], self.encoder)
+        specific_caption_feats = specific_caption_feats.cuda().to(torch.float32).detach()
+        
+        fg_text_feat_list = []
+        cap_num = 0
+        for i in range(len(self.fg_text_features)):
+            if cls_label[i] == 0:
+                fg_text_feat_list.append(self.fg_text_features[i].cuda().detach().to(torch.float32))
+                continue
+            ref_cap = specific_caption_feats[cap_num].unsqueeze(0)
+            cap_num += 1
+            refined_feat = self.fuse_transformer_fg(self.fg_text_features[i].cuda().detach().to(torch.float32).unsqueeze(0), ref_cap, ref_cap)
+            fg_text_feat_list.append(refined_feat.squeeze(0))
+        fg_text_features = torch.stack(fg_text_feat_list, dim=0)
+        
+        bg_text_features = self.bg_text_features.cuda().detach().to(torch.float32)
+        return fg_text_features, bg_text_features
 
     
-    def forward(self, img, img_names='2007_000032', captions=None, mode='train', requires_prompt=False):
+    def forward(self, img, img_names='2007_000032', captions=None, mode='train', requires_prompt=False, cls_labels=None):
         cam_list = []
         prompts_list = []
         b, c, h, w = img.shape
@@ -227,7 +266,6 @@ class WeCLIP(nn.Module):
 
         fts = self.decoder_fts_fuse(all_img_tokens)
         attn_fts = fts.clone()
-        _, _, fts_h, fts_w = fts.shape
         
         seg, seg_attn_weight_list = self.decoder(fts)
         
@@ -249,6 +287,11 @@ class WeCLIP(nn.Module):
                 elif self.fuse_mode=="txt":
                     caption = captions[i]
                     fg_text_feats, bg_text_feats = self.refine_text(caption)
+                elif self.fuse_mode=="cls_txt":
+                    caption = captions[i]
+                    cls_label = cls_labels[i]
+                    caption_dir = os.path.join(self.caption_file_dir, f"{img_name}.pickle")
+                    fg_text_feats, bg_text_feats = self.refine_text_specific(caption, caption_dir, cls_label)
                 else:
                     caption = captions[i]
                     fg_text_feats, bg_text_feats = self.refine_text_parsed(caption)
@@ -260,7 +303,7 @@ class WeCLIP(nn.Module):
             else:
                 require_seg_trans = False
 
-            cam_refined_list, keys, w, h = perform_single_voc_cam(img_path, img_i, cam_fts, cam_attn, seg_attn,
+            cam_refined_list, keys, w, h = self.cam_func_dict.get(self.dataset)(img_path, img_i, cam_fts, cam_attn, seg_attn,
                                                                    bg_text_feats, fg_text_feats,
                                                                    self.grad_cam,
                                                                    mode=mode,
