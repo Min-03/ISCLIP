@@ -30,14 +30,16 @@ parser.add_argument("--config",
 parser.add_argument("--seg_detach", action="store_true", help="detach seg")
 parser.add_argument("--work_dir", default=None, type=str, help="work_dir")
 parser.add_argument("--radius", default=8, type=int, help="radius")
+parser.add_argument("--resize_long", default=512, type=int, help="resize the long side")
 parser.add_argument("--crop_size", default=320, type=int, help="crop_size")
 parser.add_argument("--ft_layers", default=2, type=int, help="number of layers in fusion transformer")
 parser.add_argument("--num_workers", default=10, type=int, help="num_workers for dataloader")
 parser.add_argument("--m_weight", default=0.1, type=float, help="loss weight for matching loss")
 parser.add_argument("--match_ratio", default=0.75, type=float, help="match raitio used for parsed caption matching")
-parser.add_argument("--fuse_ver", default=1, type=int)
-parser.add_argument("--fuse_mode", default="txt", type=str)
-parser.add_argument("--refine_always", action="store_true")
+parser.add_argument("--fuse_ver", default=1, type=int, help="which model to use for refining prompts")
+parser.add_argument("--fuse_mode", default="txt", type=str, help="which option(txt, cls_txt, img...) to use for refining prompts")
+parser.add_argument("--refine_always", action="store_true", help="whether to refine CLIP visual encoder's attention until end")
+parser.add_argument("--refine_bg", action="store_true", help="whether to refine background prompts with caption")
     
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -76,41 +78,91 @@ def cal_eta(time0, cur_iter, total_iter):
     return str(delta), str(eta)
 
 
-def validate(model=None, data_loader=None, cfg=None):
+def validate(model=None, data_loader=None, cfg=None, test_scales=[1, 0.75]):
 
-    preds, gts, cams, aff_gts = [], [], [], []
-    num = 1
-    seg_hist = np.zeros((21, 21))
-    cam_hist = np.zeros((21, 21))
-    for _, data in enumerate(data_loader):
-        name, inputs, labels, cls_label = data
+    _preds, _gts, _msc_preds, cams = [], [], [], []
+    
+    model.cuda(0)
+    model.eval()
+
+    num = 0
+
+    _preds_hist = np.zeros((21, 21))
+    _msc_preds_hist = np.zeros((21, 21))
+    _cams_hist = np.zeros((21, 21))
+
+    for idx, data in enumerate(data_loader):
+        num+=1
+
+        name, inputs, labels, cls_labels = data
+        names = name+name
 
         inputs = inputs.cuda()
         labels = labels.cuda()
 
-        segs, cam, attn_loss = model(inputs, name, mode='val')
+        #######
+        # resize long side to 512
+        
+        _, _, h, w = inputs.shape
+        ratio = args.resize_long / max(h,w)
+        _h, _w = int(h*ratio), int(w*ratio)
+        inputs = F.interpolate(inputs, size=(_h, _w), mode='bilinear', align_corners=False)
+        
+        #######
+
+        segs_list = []
+        inputs_cat = torch.cat([inputs, inputs.flip(-1)], dim=0)
+        segs_cat, cam, attn_loss = model(inputs_cat, names, mode = 'val')
+        
+        cam = cam[0].unsqueeze(0)
+        segs = segs_cat[0].unsqueeze(0)
+
+        _segs = (segs_cat[0,...] + segs_cat[1,...].flip(-1)) / 2
+        segs_list.append(_segs)
+
+        _, _, h, w = segs_cat.shape
+        _, h_c, w_c = cam.shape
+
+        for s in test_scales:
+            if s != 1.0:
+                _inputs = F.interpolate(inputs, scale_factor=s, mode='bilinear', align_corners=False)
+                inputs_cat = torch.cat([_inputs, _inputs.flip(-1)], dim=0)
+
+                segs_cat, cam_cat, attn_loss = model(inputs_cat, names, mode='val')
+
+                _segs_cat = F.interpolate(segs_cat, size=(h, w), mode='bilinear', align_corners=False)
+                _segs = (_segs_cat[0,...] + _segs_cat[1,...].flip(-1)) / 2
+                segs_list.append(_segs)
+                
+
+        msc_segs = torch.mean(torch.stack(segs_list, dim=0), dim=0).unsqueeze(0)
 
         resized_segs = F.interpolate(segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
+        seg_preds = torch.argmax(resized_segs, dim=1)
 
-        preds += list(torch.argmax(resized_segs, dim=1).cpu().numpy().astype(np.int16))
+        resized_msc_segs = F.interpolate(msc_segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
+        msc_seg_preds = torch.argmax(resized_msc_segs, dim=1)
+        
+
         cams += list(cam.cpu().numpy().astype(np.int16))
-        gts += list(labels.cpu().numpy().astype(np.int16))
+        _preds += list(seg_preds.cpu().numpy().astype(np.int16))
+        _msc_preds += list(msc_seg_preds.cpu().numpy().astype(np.int16))
+        _gts += list(labels.cpu().numpy().astype(np.int16))
 
-        num+=1
 
-        if num % 1000 ==0:
-            seg_hist, seg_score = evaluate.scores(gts, preds, seg_hist)
-            cam_hist, cam_score = evaluate.scores(gts, cams, cam_hist)
-            preds, gts, cams, aff_gts = [], [], [], []
-            
         if num % 100 == 0:
-            print(f"Done {num} out of {len(data_loader)} img")
-
-    seg_hist, seg_score = evaluate.scores(gts, preds, seg_hist)
-    cam_hist, cam_score = evaluate.scores(gts, cams, cam_hist)
+            _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
+            _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
+            _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
+            _preds, _gts, _msc_preds, cams = [], [], [], []
+            print(f"Done {num} out of {len(data_loader)}", flush=True)
+        
+    _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
+    _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
+    _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
     model.train()
-    return seg_score, cam_score
-
+            
+    return seg_score, msc_seg_score, cam_score
                 
 
 def get_seg_loss(pred, label, ignore_index=255):
@@ -188,7 +240,7 @@ def train(cfg):
         root_dir=cfg.dataset.root_dir,
         name_list_dir=cfg.dataset.name_list_dir,
         split=cfg.val.split,
-        stage='train',
+        stage='val',
         aug=False,
         ignore_index=cfg.dataset.ignore_index,
         num_classes=cfg.dataset.num_classes,
@@ -219,7 +271,8 @@ def train(cfg):
         match_ratio=args.match_ratio,
         fuse_ver=args.fuse_ver,
         fuse_mode=args.fuse_mode,
-        max_refine_iter=max_refine_iter
+        max_refine_iter=max_refine_iter,
+        refine_bg=args.refine_bg,
     )
     # logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = ISCLIP_model.get_param_groups()
@@ -325,13 +378,16 @@ def train(cfg):
         if (n_iter + 1) % cfg.train.eval_iters == 0:
             ckpt_name = os.path.join(cfg.work_dir.ckpt_dir, "ISCLIP_model_iter_%d.pth"%(n_iter+1))
             logging.info('Validating...')
+            torch.save(ISCLIP_model.state_dict(), ckpt_name)
             if (n_iter + 1) > 20000:
                 torch.save(ISCLIP_model.state_dict(), ckpt_name)
-            seg_score, cam_score = validate(model=ISCLIP_model, data_loader=val_loader, cfg=cfg)
+            seg_score, msc_seg_score, cam_score = validate(model=ISCLIP_model, data_loader=val_loader, cfg=cfg)
             logging.info("cams score:")
             logging.info(cam_score)
             logging.info("segs score:")
             logging.info(seg_score)
+            logging.info("msc segs score")
+            logging.info(msc_seg_score)
 
     return True
 

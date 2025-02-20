@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from .segformer_head import SegFormerHead
 import numpy as np
 import clip
-from .fuse_transformer import TextFusionTransformer_ver1, TextFusionTransformer_ver2, TextFusionTransformer_ver3, TextFusionTransformer_ver4
+from .fuse_transformer import TextFusionTransformer_ver1, TextFusionTransformer_ver2, TextFusionTransformer_ver3, TextFusionTransformer_ver4, TextFusionTransformer_ver5
 from clip.clip_text import new_class_names, BACKGROUND_CATEGORY, new_class_names_coco, BACKGROUND_CATEGORY_COCO
 from pytorch_grad_cam import GradCAM
 from clip.clip_tool import generate_cam_label, generate_clip_fts, perform_single_voc_cam, perform_single_coco_cam
@@ -65,7 +65,7 @@ def _refine_cams(ref_mod, images, cams, valid_key):
 
 class ISCLIP(nn.Module):
     def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda', 
-                 n_layers=2, match_ratio=0.75, fuse_ver=1, fuse_mode="txt", max_refine_iter=15000, dataset="VOC"):
+                 n_layers=2, match_ratio=0.75, fuse_ver=1, fuse_mode="txt", max_refine_iter=15000, dataset="VOC", refine_bg=False):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -85,7 +85,7 @@ class ISCLIP(nn.Module):
                                               num_classes=self.num_classes, index=11)
         self.decoder = DecoderTransformer(width=self.embedding_dim, layers=3, heads=8, output_dim=self.num_classes)
 
-        fuse_trans_dict = {1:TextFusionTransformer_ver1, 2:TextFusionTransformer_ver2, 3:TextFusionTransformer_ver3, 4:TextFusionTransformer_ver4}
+        fuse_trans_dict = {1:TextFusionTransformer_ver1, 2:TextFusionTransformer_ver2, 3:TextFusionTransformer_ver3, 4:TextFusionTransformer_ver4, 5:TextFusionTransformer_ver5}
         self.fuse_transformer_fg = fuse_trans_dict.get(fuse_ver)(embed_dim=512, heads=8, layers=n_layers)
         self.fuse_transformer_bg = fuse_trans_dict.get(fuse_ver)(embed_dim=512, heads=8, layers=n_layers)
 
@@ -113,6 +113,7 @@ class ISCLIP(nn.Module):
         if dataset != "VOC" and max_refine_iter == 15000:
             raise Exception("Something is wrong with your setting")
         self.caption_file_dir = "/data/dataset/VOC2012/SpecificCaption" if dataset == "VOC" else "/data/dataset/COCO_seg/SpecificCaption"
+        self.refine_bg = refine_bg
 
 
     def get_param_groups(self):
@@ -234,11 +235,13 @@ class ISCLIP(nn.Module):
                 continue
             ref_cap = specific_caption_feats[cap_num].unsqueeze(0)
             cap_num += 1
-            refined_feat = self.fuse_transformer_fg(self.fg_text_features[i].cuda().detach().to(torch.float32).unsqueeze(0), ref_cap, ref_cap)
+            refined_feat = self.fuse_transformer_fg(self.fg_text_features[i].cuda().detach().to(torch.float32).unsqueeze(0), ref_cap, ref_cap, class_idx=i)
             fg_text_feat_list.append(refined_feat.squeeze(0))
         fg_text_features = torch.stack(fg_text_feat_list, dim=0)
         
         bg_text_features = self.bg_text_features.cuda().detach().to(torch.float32)
+        if self.refine_bg:
+            bg_text_features = self.fuse_transformer_bg(bg_text_features, caption_feat, caption_feat)
         return fg_text_features, bg_text_features
 
     
@@ -248,6 +251,9 @@ class ISCLIP(nn.Module):
         b, c, h, w = img.shape
         self.encoder.eval()
         self.iter_num += 1
+        
+        if self.iter_num % 2000 == 0:
+            print(self.fg_text_features)
 
         fts_all, attn_weight_list = generate_clip_fts(img, self.encoder, require_all_fts=True)
 

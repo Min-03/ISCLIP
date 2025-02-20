@@ -26,17 +26,16 @@ parser.add_argument("--resize_long", default=512, type=int, help="resize the lon
 parser.add_argument("--eval_set", default="val", type=str, help="eval_set") #val
 parser.add_argument("--model_path", default="/your/path/WeCLIP/WeCLIP_model_iter_30000.pth", type=str, help="model_path")
 parser.add_argument("--ft_layers", default=2, type=int, help="number of layers in fusion transformer")
+parser.add_argument("--fuse_ver", default=4, type=int, help="which model to use for refining prompts")
+parser.add_argument("--fuse_mode", default="cls_txt", type=str, help="which option(txt, cls_txt, img...) to use for refining prompts")
+parser.add_argument("--refine_always", action="store_true", help="whether to refine CLIP visual encoder's attention until end")
+parser.add_argument("--refine_bg", action="store_true", help="whether to refine background prompts with caption")
 
 
+def validate(model=None, data_loader=None, cfg=None, test_scales=[1, 0.75]):
 
-
-def validate(model, dataset, test_scales=None):
-
-    _preds, _gts, _msc_preds, cams, msc_cams = [], [], [], [], []
+    _preds, _gts, _msc_preds, cams = [], [], [], []
     
-    data_loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=False)
-
-    # with torch.no_grad(), torch.cuda.device(0):
     model.cuda(0)
     model.eval()
 
@@ -45,9 +44,8 @@ def validate(model, dataset, test_scales=None):
     _preds_hist = np.zeros((21, 21))
     _msc_preds_hist = np.zeros((21, 21))
     _cams_hist = np.zeros((21, 21))
-    _msc_cams_hist = np.zeros((21, 21))
 
-    for idx, data in tqdm(enumerate(data_loader), total=len(data_loader), ncols=100, ascii=" >="):
+    for idx, data in enumerate(data_loader):
         num+=1
 
         name, inputs, labels, cls_labels = data
@@ -67,7 +65,6 @@ def validate(model, dataset, test_scales=None):
         #######
 
         segs_list = []
-        cam_list = []
         inputs_cat = torch.cat([inputs, inputs.flip(-1)], dim=0)
         segs_cat, cam, attn_loss = model(inputs_cat, names, mode = 'val')
         
@@ -91,13 +88,8 @@ def validate(model, dataset, test_scales=None):
                 _segs = (_segs_cat[0,...] + _segs_cat[1,...].flip(-1)) / 2
                 segs_list.append(_segs)
                 
-                _cam_cat = F.interpolate(cam_cat.unsqueeze(0), size=(h_c, w_c), mode='bilinear', align_corners=False).squeeze(0)
-                _cam = (_cam_cat[0,...] + _cam_cat[1,...].flip(-1)) / 2
-                cam_list.append(_cam)
-                
 
         msc_segs = torch.mean(torch.stack(segs_list, dim=0), dim=0).unsqueeze(0)
-        msc_cam = torch.mean(torch.stack(cam_list, dim=0), dim=0).unsqueeze(0)
 
         resized_segs = F.interpolate(segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
         seg_preds = torch.argmax(resized_segs, dim=1)
@@ -105,10 +97,8 @@ def validate(model, dataset, test_scales=None):
         resized_msc_segs = F.interpolate(msc_segs, size=labels.shape[1:], mode='bilinear', align_corners=False)
         msc_seg_preds = torch.argmax(resized_msc_segs, dim=1)
         
-        resized_msc_cam = F.interpolate(msc_cam.unsqueeze(0), size=labels.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
 
         cams += list(cam.cpu().numpy().astype(np.int16))
-        msc_cams += list(resized_msc_cam.cpu().numpy().astype(np.int16))
         _preds += list(seg_preds.cpu().numpy().astype(np.int16))
         _msc_preds += list(msc_seg_preds.cpu().numpy().astype(np.int16))
         _gts += list(labels.cpu().numpy().astype(np.int16))
@@ -118,13 +108,17 @@ def validate(model, dataset, test_scales=None):
             _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
             _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
             _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
-            _msc_cams_hist, msc_cam_score = evaluate.scores(_gts, msc_cams, _msc_cams_hist)
-            _preds, _gts, _msc_preds, cams, msc_cams = [], [], [], [], []
-
-
-        np.save(args.work_dir+ '/logit/' + name[0] + '.npy', {"segs":segs.detach().cpu().numpy(), "msc_segs":msc_segs.detach().cpu().numpy()})
+            _preds, _gts, _msc_preds, cams = [], [], [], []
+            print(f"Done {num} out of {len(data_loader)}", flush=True)
+        
+    _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
+    _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
+    _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
+    
+    np.save(args.work_dir+ '/logit/' + name[0] + '.npy', {"segs":segs.detach().cpu().numpy(), "msc_segs":msc_segs.detach().cpu().numpy()})
+    
             
-    return _gts, _preds, _msc_preds, cams, msc_cams, _preds_hist, _msc_preds_hist, _cams_hist, _msc_cams_hist
+    return seg_score, msc_seg_score, cam_score
 
 
 def crf_proc(config):
@@ -197,32 +191,35 @@ def main(cfg):
         ignore_index=cfg.dataset.ignore_index,
         num_classes=cfg.dataset.num_classes,
     )
-
-    ISCLIP_model = ISCLIP(num_classes=cfg.dataset.num_classes,
-                     clip_model=cfg.clip_init.clip_pretrain_path,
-                     embedding_dim=cfg.clip_init.embedding_dim,
-                     in_channels=cfg.clip_init.in_channels,
-                     dataset_root_path=cfg.dataset.root_dir,
-                     device='cuda',
-                     n_layers=args.ft_layers)
+    
+    ISCLIP_model = ISCLIP(
+        num_classes=cfg.dataset.num_classes,
+        clip_model=cfg.clip_init.clip_pretrain_path,
+        embedding_dim=cfg.clip_init.embedding_dim,
+        in_channels=cfg.clip_init.in_channels,
+        dataset_root_path=cfg.dataset.root_dir,
+        device='cuda',
+        n_layers=args.ft_layers,
+        fuse_ver=args.fuse_ver,
+        fuse_mode=args.fuse_mode,
+        refine_bg=args.refine_bg,
+    )
+    
+    val_data_loader = torch.utils.data.DataLoader(val_dataset, 
+                                                  batch_size=1, 
+                                                  shuffle=False, 
+                                                  num_workers=4, 
+                                                  pin_memory=True, 
+                                                  drop_last=False)
     
     trained_state_dict = torch.load(args.model_path, map_location="cpu")
 
     ISCLIP_model.load_state_dict(state_dict=trained_state_dict, strict=False)
-    ISCLIP_model.eval()
 
-    gts, preds, msc_preds, cams, msc_cams, preds_hist, msc_preds_hist, cams_hist, msc_cams_hist = validate(model=ISCLIP_model, dataset=val_dataset, test_scales=[1, 0.75])
-    torch.cuda.empty_cache()
-
-    preds_hist, seg_score = evaluate.scores(gts, preds, preds_hist)
-    msc_preds_hist, msc_seg_score = evaluate.scores(gts, msc_preds, msc_preds_hist)
-    cams_hist, cam_score = evaluate.scores(gts, cams, cams_hist)
-    msc_cams_hist, msc_cam_score = evaluate.scores(gts, msc_cams, msc_cams_hist)
-
+    seg_score, msc_seg_score, cam_score = validate(model=ISCLIP_model, data_loader=val_data_loader)
+    
     print("cams score:")
     print(cam_score)
-    print("msc cam score")
-    print(msc_cam_score)
     print("segs score:")
     print(seg_score)
     print("msc segs score:")

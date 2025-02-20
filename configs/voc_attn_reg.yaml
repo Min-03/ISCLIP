@@ -24,7 +24,7 @@ train:
 
 
 val:
-  split: train
+  split: val
 
 optimizer:
   type: AdamW

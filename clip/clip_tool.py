@@ -154,8 +154,8 @@ def perform_single_voc_cam(img_path, image, image_features, attn_weight_list, se
                 attn_weight = torch.cat([attn_weight_list, attn_weight_last], dim=0)
                 attn_weight = attn_weight[:, 1:, 1:][-6:] #-8
 
-                attn_diff = torch.abs(seg_attn - attn_weight)
-                # attn_diff = seg_attn - attn_weight
+                # attn_diff = torch.abs(seg_attn - attn_weight)
+                attn_diff = seg_attn - attn_weight
                 attn_diff = torch.sum(attn_diff.flatten(1), dim=1)
                 diff_th = torch.mean(attn_diff)
 
