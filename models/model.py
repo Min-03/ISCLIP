@@ -251,9 +251,6 @@ class ISCLIP(nn.Module):
         b, c, h, w = img.shape
         self.encoder.eval()
         self.iter_num += 1
-        
-        if self.iter_num % 2000 == 0:
-            print(self.fg_text_features)
 
         fts_all, attn_weight_list = generate_clip_fts(img, self.encoder, require_all_fts=True)
 
