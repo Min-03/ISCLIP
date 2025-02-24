@@ -8,7 +8,7 @@ dataset:
   ignore_index: 255
 
 work_dir:
-  dir: /data/dataset/VOC2012/weclip_results
+  dir: /data/dataset/VOC2012/weclip_results/train_results
   ckpt_dir: checkpoints
   pred_dir: predictions
   segs_dir: segs

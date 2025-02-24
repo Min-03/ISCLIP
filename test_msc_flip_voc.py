@@ -105,10 +105,10 @@ def validate(model=None, data_loader=None, cfg=None, test_scales=[1, 0.75]):
 
 
         if num % 100 == 0:
-            _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
-            _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
-            _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
-            _preds, _gts, _msc_preds, cams = [], [], [], []
+            # _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
+            # _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
+            # _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
+            # _preds, _gts, _msc_preds, cams = [], [], [], []
             print(f"Done {num} out of {len(data_loader)}", flush=True)
     
         np.save(args.work_dir+ '/logit/' + name[0] + '.npy', {"segs":segs.detach().cpu().numpy(), "msc_segs":msc_segs.detach().cpu().numpy()})

@@ -151,10 +151,10 @@ def validate(model=None, data_loader=None, cfg=None, test_scales=[1, 0.75]):
 
 
         if num % 100 == 0:
-            _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
-            _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
-            _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
-            _preds, _gts, _msc_preds, cams = [], [], [], []
+            # _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
+            # _msc_preds_hist, msc_seg_score = evaluate.scores(_gts, _msc_preds, _msc_preds_hist)
+            # _cams_hist, cam_score = evaluate.scores(_gts, cams, _cams_hist)
+            # _preds, _gts, _msc_preds, cams = [], [], [], []
             print(f"Done {num} out of {len(data_loader)}", flush=True)
         
     _preds_hist, seg_score = evaluate.scores(_gts, _preds, _preds_hist)
@@ -403,15 +403,19 @@ if __name__ == "__main__":
 
     timestamp = "{0:%Y-%m-%d-%H-%M}".format(datetime.datetime.now())
 
-    cfg.work_dir.ckpt_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.ckpt_dir, timestamp)
-    cfg.work_dir.pred_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.pred_dir)
-    cfg.work_dir.tb_logger_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.tb_logger_dir, timestamp)
+    # cfg.work_dir.ckpt_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.ckpt_dir, timestamp)
+    # cfg.work_dir.pred_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.pred_dir)
+    # cfg.work_dir.tb_logger_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.tb_logger_dir, timestamp)
+    
+    cfg.work_dir.ckpt_dir = os.path.join(cfg.work_dir.dir, timestamp, cfg.work_dir.ckpt_dir)
+    cfg.work_dir.pred_dir = os.path.join(cfg.work_dir.dir, timestamp, cfg.work_dir.pred_dir)
+    cfg.work_dir.tb_logger_dir = os.path.join(cfg.work_dir.dir, timestamp, cfg.work_dir.tb_logger_dir)
 
     os.makedirs(cfg.work_dir.ckpt_dir, exist_ok=True)
     os.makedirs(cfg.work_dir.pred_dir, exist_ok=True)
     os.makedirs(cfg.work_dir.tb_logger_dir, exist_ok=True)
 
-    setup_logger(filename=os.path.join(cfg.work_dir.dir, timestamp+'.log'))
+    setup_logger(filename=os.path.join(cfg.work_dir.dir, timestamp, 'train.log'))
     logging.info('\nargs: %s' % args)
     logging.info('\nconfigs: %s' % cfg)
 
