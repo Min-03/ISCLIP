@@ -20,6 +20,7 @@ from utils.AverageMeter import AverageMeter
 from utils.camutils import cams_to_affinity_label
 from utils.optimizer import PolyWarmupAdamW
 from WeCLIP_model.model_attn_aff_voc import WeCLIP
+from WeCLIP.WeCLIP_model.ISCLIP_voc import ISCLIP
 
 
 parser = argparse.ArgumentParser()
@@ -32,7 +33,11 @@ parser.add_argument("--work_dir", default=None, type=str, help="work_dir")
 parser.add_argument("--radius", default=8, type=int, help="radius")
 parser.add_argument("--crop_size", default=320, type=int, help="crop_size")
 parser.add_argument("--num_workers", default=10, type=int)
-
+parser.add_argument("--resize_long", default=512, type=int, help="resize the long side")
+parser.add_argument("--fuse_ver", default=1, type=int)
+parser.add_argument("--cap_dir", default=None, type=str)
+parser.add_argument("--ft_layers", default=2, type=int)
+parser.add_argument("--debug", action="store_true")
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -233,13 +238,25 @@ def train(cfg):
                             pin_memory=False,
                             drop_last=False)
 
-    WeCLIP_model = WeCLIP(
+    # WeCLIP_model = WeCLIP(
+    #     num_classes=cfg.dataset.num_classes,
+    #     clip_model=cfg.clip_init.clip_pretrain_path,
+    #     embedding_dim=cfg.clip_init.embedding_dim,
+    #     in_channels=cfg.clip_init.in_channels,
+    #     dataset_root_path=cfg.dataset.root_dir,
+    #     device='cuda'
+    # )
+    
+    WeCLIP_model = ISCLIP(
         num_classes=cfg.dataset.num_classes,
         clip_model=cfg.clip_init.clip_pretrain_path,
         embedding_dim=cfg.clip_init.embedding_dim,
         in_channels=cfg.clip_init.in_channels,
         dataset_root_path=cfg.dataset.root_dir,
-        device='cuda'
+        device='cuda',
+        caption_file_dir=args.cap_dir,
+        fuse_ver=args.fuse_ver,
+        n_layers=args.ft_layers
     )
     # logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = WeCLIP_model.get_param_groups()
@@ -272,6 +289,11 @@ def train(cfg):
                 "lr": cfg.optimizer.learning_rate*10,
                 "weight_decay": cfg.optimizer.weight_decay,
             },
+            {
+                "params": param_groups[4],
+                "lr": cfg.optimizer.learning_rate*10,
+                "weight_decay": cfg.optimizer.weight_decay,
+            }
         ],
         lr = cfg.optimizer.learning_rate,
         weight_decay = cfg.optimizer.weight_decay,
@@ -296,7 +318,8 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box = next(train_loader_iter)
 
-        segs, cam, attn_pred = WeCLIP_model(inputs.cuda(), img_name)
+        mode = "debug" if args.debug else "train"
+        segs, cam, attn_pred = WeCLIP_model(inputs.cuda(), img_name, mode=mode, cls_labels=cls_labels)
 
         pseudo_label = cam
 
@@ -340,11 +363,13 @@ def train(cfg):
             logging.info('Validating...')
             if (n_iter + 1) >= 26000:
                 torch.save(WeCLIP_model.state_dict(), ckpt_name)
-            seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
+            seg_score, msc_seg_score, cam_score = validate(model=WeCLIP_model, data_loader=val_loader, cfg=cfg)
             logging.info("cams score:")
             logging.info(cam_score)
             logging.info("segs score:")
             logging.info(seg_score)
+            logging.info("msc segs score")
+            logging.info(msc_seg_score)
 
     return True
 
@@ -372,7 +397,7 @@ if __name__ == "__main__":
     os.makedirs(cfg.work_dir.pred_dir, exist_ok=True)
     os.makedirs(cfg.work_dir.tb_logger_dir, exist_ok=True)
 
-    setup_logger(filename=os.path.join(cfg.work_dir.dir, timestamp+'.log'))
+    setup_logger(filename=os.path.join(cfg.work_dir.dir, timestamp, 'train.log'))
     logging.info('\nargs: %s' % args)
     logging.info('\nconfigs: %s' % cfg)
 
