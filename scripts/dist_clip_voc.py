@@ -14,12 +14,13 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from datasets import voc
-from utils.losses import get_aff_loss, MultiLabelCLLoss
+from utils.losses import get_aff_loss
 from utils import evaluate
 from utils.AverageMeter import AverageMeter
 from utils.camutils import cams_to_affinity_label
 from utils.optimizer import PolyWarmupAdamW
 from models.model import ISCLIP
+import warnings
 
 
 parser = argparse.ArgumentParser()
@@ -37,18 +38,21 @@ parser.add_argument("--num_workers", default=10, type=int, help="num_workers for
 parser.add_argument("--m_weight", default=0.1, type=float, help="loss weight for matching loss")
 parser.add_argument("--match_ratio", default=0.75, type=float, help="match raitio used for parsed caption matching")
 parser.add_argument("--fuse_ver", default=1, type=int, help="which model to use for refining prompts")
+parser.add_argument("--cap_ver", default=1, type=int)
 parser.add_argument("--fuse_mode", default="txt", type=str, help="which option(txt, cls_txt, img...) to use for refining prompts")
 parser.add_argument("--refine_always", action="store_true", help="whether to refine CLIP visual encoder's attention until end")
 parser.add_argument("--refine_bg", action="store_true", help="whether to refine background prompts with caption")
+parser.add_argument("--refine_all", action="store_true", help="whether to refine other non-gt forground prompts with caption")
+parser.add_argument("--debug", action="store_true")
+parser.add_argument("--use_raw", action="store_true")
+
+warnings.filterwarnings(action='ignore', category=UserWarning)
     
 def setup_seed(seed):
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-      torch.cuda.manual_seed(seed)
-      torch.cuda.manual_seed_all(seed)
+    torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
-    torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
 def setup_logger(filename='test.log'):
@@ -221,6 +225,8 @@ def train(cfg):
     
     time0 = datetime.datetime.now()
     time0 = time0.replace(microsecond=0)
+    if args.debug:
+        cfg.train.max_iters = 30000
     
     train_dataset = voc.VOC12CapClsDataset(
         root_dir=cfg.dataset.root_dir,
@@ -273,7 +279,11 @@ def train(cfg):
         fuse_mode=args.fuse_mode,
         max_refine_iter=max_refine_iter,
         refine_bg=args.refine_bg,
+        refine_all=args.refine_all,
+        use_raw=args.use_raw,
+        cap_ver=args.cap_ver
     )
+    
     # logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = ISCLIP_model.get_param_groups()
     ISCLIP_model.cuda()
@@ -335,7 +345,8 @@ def train(cfg):
             train_loader_iter = iter(train_loader)
             img_name, inputs, cls_labels, img_box, captions = next(train_loader_iter)
 
-        segs, cam, attn_pred= ISCLIP_model(inputs.cuda(), img_name, captions, cls_labels=cls_labels)
+        mode = "train" if not args.debug else "debug"
+        segs, cam, attn_pred= ISCLIP_model(inputs.cuda(), img_name, captions, mode=mode, cls_labels=cls_labels)
 
         pseudo_label = cam
 

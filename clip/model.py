@@ -404,11 +404,40 @@ class CLIP(nn.Module):
 
         return x
     
-    def forward_last_layer(self, image_features, text_features, do_softmax=True, require_img=False):
+    def forward_img_last_layer(self, image_features):
+        x, _ = self.visual.transformer.resblocks[self.visual.transformer.layers-1](image_features)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+
+        x = self.visual.ln_post(x)
+
+        if self.visual.proj is not None:
+            x = x @ self.visual.proj
+            
+        # x = x[:, 1:, :]
+        
+        return x
+    
+    def get_logits(self, image_features, text_features):
+        # normalized features
+        image_features = image_features / image_features.norm(dim=1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=1, keepdim=True)
+
+        # cosine similarity as logits
+        logit_scale = self.logit_scale.exp()
+        logits_per_image = logit_scale * image_features @ text_features.t()
+
+        # shape = [global_batch_size, global_batch_size]
+        
+        logits_per_image = logits_per_image.softmax(dim=-1)
+
+        return logits_per_image
+    
+    def forward_last_layer(self, image_features, text_features, require_img=False):
         x, attn_weight = self.visual.transformer.resblocks[self.visual.transformer.layers-1](image_features)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         x = self.visual.ln_post(x)
+
         x = torch.mean(x[:, 1:, :], dim=1)
 
         if self.visual.proj is not None:
@@ -419,9 +448,7 @@ class CLIP(nn.Module):
         # normalized features
         image_features = image_features / image_features.norm(dim=1, keepdim=True)
         text_features = text_features / text_features.norm(dim=1, keepdim=True)
-        if not do_softmax:
-            logits_per_image =  image_features @ text_features.t()
-            return logits_per_image, attn_weight
+
         # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
         logits_per_image = logit_scale * image_features @ text_features.t()

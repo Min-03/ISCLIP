@@ -44,9 +44,8 @@ def make_caption(cfg):
     model = InstructBlipForConditionalGeneration.from_pretrained(model_name, torch_dtype=torch.float16).cuda()
 
     img_dir = "/data/dataset/VOC2012/JPEGImages"
-    caption_file_dir = "/data/dataset/VOC2012/SpecificCaption"
+    caption_file_dir = "/data/dataset/VOC2012/SpecificCaption2"
     
-
     for img_names, inputs, cls_labels, img_box in tqdm(train_loader):
         img = Image.open(os.path.join(img_dir, img_names[0] + '.jpg')).convert('RGB')
 
@@ -54,7 +53,7 @@ def make_caption(cfg):
         
         present_cls_name = [class_names[idx] for idx in present_cls]
 
-        instructions = [f"A image of {cls}" for cls in present_cls_name]
+        instructions = [f"What does {cls} look like?" for cls in present_cls_name]
 
         captions = {}
         for idx, instruction in zip(present_cls, instructions):
@@ -63,6 +62,7 @@ def make_caption(cfg):
                                     max_new_tokens=50,
                                     )
             caption = processor.decode(output[0], skip_special_tokens=True)
+            caption = caption[len(instruction):]
             captions[idx] = caption
             
         caption_dir = os.path.join(caption_file_dir, f"{img_names[0]}.pickle")
@@ -73,7 +73,7 @@ def make_caption(cfg):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config",
-                        default='/home/student/minseo/WeCLIP/configs/voc_attn_reg.yaml',
+                        default='/home/student/minseo/ISCLIP/configs/voc_attn_reg.yaml',
                         type=str,
                         help="config")
     args = parser.parse_args()

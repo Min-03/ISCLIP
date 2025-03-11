@@ -30,6 +30,7 @@ parser.add_argument("--fuse_ver", default=4, type=int, help="which model to use 
 parser.add_argument("--fuse_mode", default="cls_txt", type=str, help="which option(txt, cls_txt, img...) to use for refining prompts")
 parser.add_argument("--refine_always", action="store_true", help="whether to refine CLIP visual encoder's attention until end")
 parser.add_argument("--refine_bg", action="store_true", help="whether to refine background prompts with caption")
+parser.add_argument("--refine_all", action="store_true", help="whether to refine other non-gt forground prompts with caption")
 
 
 def validate(model=None, data_loader=None, cfg=None, test_scales=[1, 0.75]):
@@ -203,6 +204,7 @@ def main(cfg):
         fuse_ver=args.fuse_ver,
         fuse_mode=args.fuse_mode,
         refine_bg=args.refine_bg,
+        refine_all=args.refine_all,
     )
     
     val_data_loader = torch.utils.data.DataLoader(val_dataset, 
