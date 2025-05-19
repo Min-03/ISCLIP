@@ -37,6 +37,7 @@ parser.add_argument("--fuse_weight", default=0.1, type=float)
 parser.add_argument("--cam_fuse_weight", default=0.5, type=float)
 parser.add_argument("--refine_cam", action="store_true")
 parser.add_argument("--train_mode", default="train", type=str)
+parser.add_argument("--fuse_ver", default=1, type=int)
 
 
 def setup_seed(seed):
@@ -194,7 +195,8 @@ def train(cfg):
         device='cuda',
         caption_dir=args.cap_dir,
         fuse_weight=args.fuse_weight,
-        cam_fuse_weight=args.cam_fuse_weight
+        cam_fuse_weight=args.cam_fuse_weight,
+        fuse_ver=args.fuse_ver
     )
     logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = WeCLIP_model.get_param_groups()

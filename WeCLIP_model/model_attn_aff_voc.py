@@ -4,15 +4,16 @@ import torch.nn.functional as F
 from .segformer_head import SegFormerHead
 import numpy as np
 import clip
-from clip.clip_text import new_class_names, BACKGROUND_CATEGORY
+from clip.clip_text import new_class_names, BACKGROUND_CATEGORY, class_names
 from pytorch_grad_cam import GradCAM
 from clip.clip_tool import generate_cam_label, generate_clip_fts, perform_single_voc_cam
 import os
 from torchvision.transforms import Compose, Normalize
 from .Decoder.TransDecoder import DecoderTransformer
 from WeCLIP_model.PAR import PAR
+from utils.nlputils import extract_noun_phrase
 import pickle
-
+import spacy
 
 
 
@@ -60,7 +61,7 @@ def _refine_cams(ref_mod, images, cams, valid_key):
 
 class WeCLIP(nn.Module):
     def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda',
-                caption_dir=None, fuse_weight=0.1, cam_fuse_weight=0.5):
+                caption_dir=None, fuse_weight=0.1, cam_fuse_weight=0.5, fuse_ver=1):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -95,7 +96,8 @@ class WeCLIP(nn.Module):
         self.caption_file_dir = caption_dir
         self.fuse_weight = fuse_weight
         self.cam_fuse_weight = cam_fuse_weight
-
+        self.fuse_ver = fuse_ver
+        self.nlp = spacy.load("en_core_web_sm")
 
     def get_param_groups(self):
 
@@ -110,6 +112,8 @@ class WeCLIP(nn.Module):
     
     def refine_text(self, caption_dir, cls_label):
         """
+        Refines text with most similar caption
+
         Args:
             caption_dir : directory where captions are stored
             cls_labels (C, ) : cls label for each img
@@ -129,6 +133,34 @@ class WeCLIP(nn.Module):
             ref_cap_feat = zeroshot_classifier(ref_cap, ['a clean origami {}.'], self.encoder)
             sim = torch.mm(ref_cap_feat, self.fg_text_features[i].unsqueeze(-1))
             tgt_cap_feat = ref_cap_feat[sim.argmax(dim=0).item()]
+            refined_feat = self.fuse_weight * tgt_cap_feat + (1 - self.fuse_weight) * self.fg_text_features[i].cuda()
+            fg_text_feat_list.append(refined_feat)
+        fg_text_feats = torch.stack(fg_text_feat_list, dim=0)
+        return fg_text_feats
+
+    def refine_text_ver2(self, caption_dir, cls_label):
+        """
+        Refines text with target noun/detailed noun extracted from caption
+        
+        Args:
+            caption_dir : directory where captions are stored
+            cls_labels (C, ) : cls label for each img
+
+        Outputs:
+            refined_text_feats (C, D) : image specific text feat using captioner
+        """
+        with open(caption_dir, "rb") as fr:
+            specific_captions = pickle.load(fr)
+
+        fg_text_feat_list = []
+        for i in range(len(self.fg_text_features)):
+            if cls_label[i] == 0:
+                fg_text_feat_list.append(self.fg_text_features[i].cuda())
+                continue
+            ref_cap = specific_captions[i][0]
+            ref_cap = extract_noun_phrase(ref_cap, self.nlp, class_names[i])
+            ref_cap_feat = zeroshot_classifier(ref_cap, ['a clean origami {}.'], self.encoder)
+            tgt_cap_feat = ref_cap_feat[0]
             refined_feat = self.fuse_weight * tgt_cap_feat + (1 - self.fuse_weight) * self.fg_text_features[i].cuda()
             fg_text_feat_list.append(refined_feat)
         fg_text_feats = torch.stack(fg_text_feat_list, dim=0)
@@ -260,7 +292,10 @@ class WeCLIP(nn.Module):
 
             if mode == "train":
                 caption_dir = os.path.join(self.caption_file_dir, f"{img_name}.pickle")
-                fg_text_feats = self.refine_text(caption_dir, cls_labels[i])
+                if self.fuse_ver == 1:
+                    fg_text_feats = self.refine_text(caption_dir, cls_labels[i])
+                else:
+                    fg_text_feats = self.refine_text_ver2(caption_dir, cls_labels[i])
             else:
                 fg_text_feats = self.fg_text_features
 
