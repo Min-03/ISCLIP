@@ -61,7 +61,7 @@ def _refine_cams(ref_mod, images, cams, valid_key):
 
 class WeCLIP(nn.Module):
     def __init__(self, num_classes=None, clip_model=None, embedding_dim=256, in_channels=512, dataset_root_path=None, device='cuda',
-                caption_dir=None, fuse_weight=0.1, cam_fuse_weight=0.5, fuse_ver=1):
+                caption_dir=None, fuse_weight=0.1, cam_fuse_weight=0.5, fuse_ver=1, seg_refine_mode=None, use_raw=False):
         super().__init__()
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
@@ -98,6 +98,8 @@ class WeCLIP(nn.Module):
         self.cam_fuse_weight = cam_fuse_weight
         self.fuse_ver = fuse_ver
         self.nlp = spacy.load("en_core_web_sm")
+        self.seg_refine_mode = seg_refine_mode
+        self.use_raw = use_raw
 
     def get_param_groups(self):
 
@@ -130,6 +132,11 @@ class WeCLIP(nn.Module):
                 fg_text_feat_list.append(self.fg_text_features[i].cuda())
                 continue
             ref_cap = specific_captions[i]
+            if self.use_raw:
+                ref_cap = ref_cap[0]
+                ref_cap_feat = zeroshot_classifier([ref_cap], ['a clean origami {}.'], self.encoder).squeeze(0)
+                fg_text_feat_list.append(ref_cap_feat)
+                continue
             ref_cap_feat = zeroshot_classifier(ref_cap, ['a clean origami {}.'], self.encoder)
             sim = torch.mm(ref_cap_feat, self.fg_text_features[i].unsqueeze(-1))
             tgt_cap_feat = ref_cap_feat[sim.argmax(dim=0).item()]
@@ -159,8 +166,10 @@ class WeCLIP(nn.Module):
                 continue
             ref_cap = specific_captions[i][0]
             ref_cap = extract_noun_phrase(ref_cap, self.nlp, class_names[i])
-            ref_cap_feat = zeroshot_classifier(ref_cap, ['a clean origami {}.'], self.encoder)
-            tgt_cap_feat = ref_cap_feat[0]
+            cap_feat = zeroshot_classifier(ref_cap, ['a clean origami {}.'], self.encoder)
+            sim = torch.mm(cap_feat, self.fg_text_features[i].unsqueeze(-1)) # (cap_num, 1)
+            tgt_cap_feat = cap_feat[:, sim.argmax(dim=0).item()] 
+            tgt_cap_feat = tgt_cap_feat.sum(dim=0)
             refined_feat = self.fuse_weight * tgt_cap_feat + (1 - self.fuse_weight) * self.fg_text_features[i].cuda()
             fg_text_feat_list.append(refined_feat)
         fg_text_feats = torch.stack(fg_text_feat_list, dim=0)
@@ -230,7 +239,17 @@ class WeCLIP(nn.Module):
                 cams = cam_dict['refined_cam'].cuda()
                 cams_list.append(cams)
 
-            cams_final = self.cam_fuse_weight * cams_list[0] + (1 - self.cam_fuse_weight) * cams_list[1] 
+            w = self.cam_fuse_weight
+            if self.use_raw:
+                gamma = 0.8
+            else:
+                gamma = 0.5
+            cams_final = torch.where(
+                cams_list[0] > gamma,
+                w * cams_list[0] + (1 - w) * cams_list[1],
+                cams_list[1]
+            )
+    
             bg_score = torch.pow(1 - torch.max(cams_final, dim=0, keepdims=True)[0], self.cam_bg_thres).cuda()
             cams_final = torch.cat([bg_score, cams_final], dim=0).cuda()
             
@@ -245,6 +264,28 @@ class WeCLIP(nn.Module):
         all_cam_labels = torch.stack(cam_list, dim=0)
 
         return seg, all_cam_labels, attn_pred
+
+    def refine_seg(self, cam, seg, keys, refine_mode="multiply"):
+        """
+        refine segment with CAM (only can used in training time)
+        args:
+            cam(fg_num, H, W) : CAM generated with image-aware prompts
+            seg(C, h, w) : final segmentation
+
+        Returns:
+            seg_refined(C, h, w) : refined segment
+        """
+        seg = F.interpolate(seg.unsqueeze(0), size=cam.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
+        if refine_mode == "multiply":
+            seg[keys] = seg[keys] * cam
+        elif refine_mode == "weighted_sum":
+            seg[keys] = (seg[keys] + cam) / 2
+        elif refine_mode == "filtering":
+            confident_flag = cam > 0.1
+            seg[keys] = seg[keys] * confident_flag
+        else:
+            raise NotImplementedError(f"Not supported refine_mode: {refine_mode}")
+        return seg
 
     def forward(self, img, img_names='2007_000032', mode='train', cls_labels=None):
         cam_list = []
@@ -278,6 +319,7 @@ class WeCLIP(nn.Module):
         attn_pred = attn_fts_flatten.transpose(2, 1).bmm(attn_fts_flatten)
         attn_pred = torch.sigmoid(attn_pred)
 
+        seg_list = []
         for i, img_name in enumerate(img_names):
             img_path = os.path.join(self.root_path, str(img_name)+'.png')
             img_i = img[i]
@@ -316,6 +358,10 @@ class WeCLIP(nn.Module):
             
             valid_key = np.pad(cam_dict['keys'] + 1, (1, 0), mode='constant')
             valid_key = torch.from_numpy(valid_key).cuda()
+
+            if self.seg_refine_mode is not None:
+                seg_refined = self.refine_seg(cams, seg[i], valid_key, refine_mode=self.seg_refine_mode)
+                seg_list.append(seg_refined)
             
             with torch.no_grad():
                 cam_labels = _refine_cams(self.par, img[i], cams, valid_key)
@@ -324,6 +370,9 @@ class WeCLIP(nn.Module):
 
         all_cam_labels = torch.stack(cam_list, dim=0)
 
+        if len(seg_list) > 0:
+            seg = torch.stack(seg_list, dim=0)
+        
         return seg, all_cam_labels, attn_pred
 
         

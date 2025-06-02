@@ -36,8 +36,10 @@ parser.add_argument("--cap_dir", default="/data/dataset/VOC2012/Cap", type=str)
 parser.add_argument("--fuse_weight", default=0.1, type=float)
 parser.add_argument("--cam_fuse_weight", default=0.5, type=float)
 parser.add_argument("--refine_cam", action="store_true")
+parser.add_argument("--use_raw", action="store_true")
 parser.add_argument("--train_mode", default="train", type=str)
 parser.add_argument("--fuse_ver", default=1, type=int)
+parser.add_argument("--refine_seg", default=None, type=str)
 
 
 def setup_seed(seed):
@@ -196,7 +198,9 @@ def train(cfg):
         caption_dir=args.cap_dir,
         fuse_weight=args.fuse_weight,
         cam_fuse_weight=args.cam_fuse_weight,
-        fuse_ver=args.fuse_ver
+        fuse_ver=args.fuse_ver,
+        seg_refine_mode=args.refine_seg,
+        use_raw=args.use_raw
     )
     logging.info('\nNetwork config: \n%s'%(WeCLIP_model))
     param_groups = WeCLIP_model.get_param_groups()
@@ -271,7 +275,6 @@ def train(cfg):
         seg_loss = get_seg_loss(segs, pseudo_label.type(torch.long), ignore_index=cfg.dataset.ignore_index)
 
         loss = 1 * seg_loss + 0.1*attn_loss
-
 
         avg_meter.add({'seg_loss': seg_loss.item(), 'attn_loss': attn_loss.item()})
 

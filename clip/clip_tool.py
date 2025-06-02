@@ -212,6 +212,7 @@ def generate_cam_label(cam_refined_list, keys, w, h):
     refined_cam_all_scales.append(torch.stack(refined_cam_to_save,dim=0))
 
     refined_cam_all_scales = refined_cam_all_scales[0]
+
     
     return {'keys': keys.numpy(), 'refined_cam':refined_cam_all_scales}
 
