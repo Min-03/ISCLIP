@@ -59,11 +59,11 @@ parser.add_argument("--pretrained", default=True, type=bool, help="use imagenet 
 parser.add_argument("--save_ckpt", default=True, action="store_true", help="save_ckpt")
 parser.add_argument("--tensorboard", default=False, type=bool, help="log tb")
 parser.add_argument("--seed", default=0, type=int, help="fix random seed")
-parser.add_argument("--work_dir", default="w_outputs", type=str, help="w_outputs")
+parser.add_argument("--work_dir", default="/data/dataset/VOC2012/excel_results/train_results", type=str)
 parser.add_argument("--log_tag", default="train_voc", type=str, help="train_voc")
 
 ### dataset utils
-parser.add_argument("--data_folder", default='/data/Datasets/VOC/VOC2012/', type=str, help="dataset folder")
+parser.add_argument("--data_folder", default='/data/dataset/VOC2012', type=str, help="dataset folder")
 parser.add_argument("--list_folder", default='datasets/voc', type=str, help="train/val/test list file")
 parser.add_argument("--num_classes", default=21, type=int, help="number of classes")
 parser.add_argument("--crop_size", default=320, type=int, help="crop_size in training")
@@ -81,6 +81,14 @@ parser.add_argument("--power", default=1, type=float, help="poweer factor for po
 parser.add_argument("--local_rank", default=-1, type=int, help="local_rank")
 parser.add_argument("--num_workers", default=10, type=int, help="num_workers")
 parser.add_argument('--backend', default='nccl')
+
+parser.add_argument("--fuse_weight", default=0.2, type=float)
+parser.add_argument("--fuse_ver", default=1, type=int)
+parser.add_argument("--cap_dir", default="/data/dataset/VOC2012/Cap", type=str)
+parser.add_argument("--aug_first", action="store_true")
+parser.add_argument("--extract_noun", action="store_true")
+parser.add_argument("--refine_cam", action="store_true")
+parser.add_argument("--gamma", default=0.3, type=float)
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -183,7 +191,8 @@ def train(args=None):
         cls_labels = cls_labels.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        segs, fts_diver, attr_maps_raw, attn_weights, attn_pred  = model(inputs)
+
+        segs, fts_diver, attr_maps_raw, attn_weights, attn_pred  = model(inputs, img_names=name, cls_labels=cls_labels)
 
         if n_iter >= 14000:
             attr_maps_raw = cure_attr_map(model,inputs, ex_feats=fts_diver)

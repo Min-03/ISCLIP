@@ -40,7 +40,7 @@ parser.add_argument("--scales", default=[1.0], help="multi_scales for seg")
 #! TO DO
 ## infer valset or testset: The test datafolder is different from valtrain folder
 parser.add_argument("--infer_set", default="val", type=str, help="infer_set")
-parser.add_argument("--data_folder", default='/data/Datasets/VOC/VOC2012/', type=str, help="dataset folder")
+parser.add_argument("--data_folder", default='/data/dataset/VOC2012/', type=str, help="dataset folder")
 parser.add_argument("--test_data_folder", default='/data/Datasets/VOC/VOC2012/', type=str, help="dataset folder")
 
 parser.add_argument("--pooling", default="gmp", type=str, help="pooling method")

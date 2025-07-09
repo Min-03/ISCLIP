@@ -83,6 +83,7 @@ def attr_clustering(dataset_name='pascal_voc', num_atrr_clusters=112, json_file=
 
     return cluster_bank
 
+
 def attr_aggregate(text_features, dataset_name='pascal_voc', num_classes=20, num_atrr_clusters=112, json_file='./gpt4.0_cluster_a_photo_of4.json',topK=0.9):
 
     attr_pth_file = f'./attributes_text/{dataset_name}_desc_clip_ViT-B-16_gpt4.0_cluster_{num_atrr_clusters}_embedding_bank.pth'

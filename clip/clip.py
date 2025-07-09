@@ -287,18 +287,20 @@ def get_similarity_map(sm, shape):
 
 def clip_feature_surgery(image_features, text_features, redundant_feats=None, t=2):
 
+    # print("img: ", image_features.shape)
+    # print("txt: ", text_features.shape)
     if redundant_feats != None:
         similarity = image_features @ (text_features - redundant_feats).t()
 
     else:
         # weights to restrain influence of obvious classes on others
-        prob = image_features[:, :1, :] @ text_features.t()
+        prob = image_features[:, :1, :] @ text_features.transpose(-2, -1) #(bs, #patch, D) * (D, bg+fg) --> (bs, #patch, bg+fg)
         prob = (prob * 2).softmax(-1)
         w = prob / prob.mean(-1, keepdim=True)
 
         # element-wise multiplied features
-        b, n_t, n_i, c = image_features.shape[0], text_features.shape[0], image_features.shape[1], image_features.shape[2]
-        feats = image_features.reshape(b, n_i, 1, c) * text_features.reshape(1, 1, n_t, c)
+        b, n_t, n_i, c = image_features.shape[0], text_features.shape[-2], image_features.shape[1], image_features.shape[2]
+        feats = image_features.reshape(b, n_i, 1, c) * text_features.reshape(-1, 1, n_t, c) # (bs, #patch, C, D)
         feats *= w.unsqueeze(-1)
         redundant_feats = feats.mean(2, keepdim=True) # along cls dim
         feats = feats - redundant_feats

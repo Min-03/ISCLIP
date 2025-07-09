@@ -36,7 +36,7 @@ parser.add_argument("--scales", default=[0.7, 1.0, 1.2, 1.5], help="multi_scales
 #! TO DO
 ## infer valset or testset: The test datafolder is different from valtrain folder
 parser.add_argument("--infer_set", default="val", type=str, help="infer_set")
-parser.add_argument("--data_folder", default='/data/Datasets/VOC/VOC2012/', type=str, help="dataset folder")
+parser.add_argument("--data_folder", default='/data/dataset/VOC2012/', type=str, help="dataset folder")
 parser.add_argument("--test_data_folder", default='/data/Datasets/VOC/VOC2012/', type=str, help="dataset folder")
 parser.add_argument("--pooling", default="gmp", type=str, help="pooling method")
 parser.add_argument("--list_folder", default='datasets/voc', type=str, help="train/val/test list file")
@@ -220,7 +220,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    base_dir = args.model_path.split("checkpoints/")[0] + f'/{args.infer_set}/'
+    # base_dir = args.model_path.split("checkpoints/")[0] + f'/{args.infer_set}/'
+    base_dir = "/data/dataset/VOC2012/excel_results/infer_results"
     cpt_name = args.model_path.split("checkpoints/")[-1].replace('.pth','')
     args.logits_dir = os.path.join(base_dir, f"{args.infer_set}_{cpt_name}_segs/logits")
     args.segs_dir = os.path.join(base_dir, f"{args.infer_set}_{cpt_name}_segs/seg_preds")

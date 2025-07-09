@@ -1,0 +1,9 @@
+nohup/
+.idea/
+pydensecrf/
+tb_logger/
+wrapper/
+nohup*.out
+*_temp.*
+*.out
+*.sh
